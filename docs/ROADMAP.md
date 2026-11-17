@@ -1,0 +1,86 @@
+# AI Memory (`mem`) 开发路线图与里程碑
+
+本项目采用**“先夯实不可变 CAS 与版本控制内核，再构建分支隔离混合检索，最后交付 MCP/CLI 工具链与 FUSE/异步整理”**的演进路线。
+
+---
+
+## Milestone 1: CAS 存储与版本控制内核（CAS & Versioned Tree Kernel）
+
+**阶段目标**：完成类似 LayerFS 核心的嵌入式 SQLite 内容寻址存储与 Merkle Tree 版本控制引擎，跑通零拷贝分支、回滚与 Diff。
+
+### 核心任务
+- [ ] **1.1 初始化 Rust Workspace 与 `mem-core`**
+  - 建立 Workspace 结构，定义 `VirtualPath`（严格路径规范化与 `MemoryTier` 解析）、`BlobId`、`TreeId`、`CommitId`、`MemoryNode`。
+- [ ] **1.2 `mem-store` SQLite CAS 底座**
+  - 配置 `rusqlite`（bundled SQLite + WAL 模式），建表 `blobs`、`trees`、`commits`、`refs`、`workspace_entries`。
+  - 实现基于 **BLAKE3 + zstd** 的内容寻址写入去重与读取。
+- [ ] **1.3 `mem-vcs` 核心版本操作**
+  - 实现按分支隔离的 Working Workspace 读写（`write`、`delete`、`read`、`list`）。
+  - 实现 Merkle Tree 自底向上构造与 `commit` 不可变快照提交。
+  - 实现 `create_branch`（零拷贝分支）、`rewind`（原子回滚分支指针并丢弃脏暂存区）、`log` 与 `diff`（利用 Merkle Tree 子树哈希快速剪枝比对）。
+- [ ] **1.4 不可达对象垃圾回收（Mark & Sweep GC）**
+  - 实现从所有 `refs` 出发遍历可达 `commits -> trees -> blobs`，安全清理被 `rewind` 或删除分支遗弃的孤儿数据。
+
+### 验收标准（Exit Criteria）
+1. 相同内容重复写入不同路径或分支时，`blobs` 表仅存一份物理记录。
+2. 在已有 10,000 个记忆节点的库中创建新分支耗时 **< 1ms**，空间增量 **0 字节**。
+3. 执行错误写入与提交后，调用 `rewind` 可 100% 精准还原到上一 Commit 的目录树状态，单元测试覆盖全部边界场景（目录覆盖文件、嵌套删除、连续回滚）。
+
+---
+
+## Milestone 2: 分支感知混合检索与热路径编译（Branch-Aware Search & Hot Compiler）
+
+**阶段目标**：在不依赖外部向量库的前提下，构建严格受 Branch 视图隔离的 BM25 + Vector 混合检索引擎及 `<5ms` `/core` 上下文编译器。
+
+### 核心任务
+- [ ] **2.1 内容切分与索引表挂载到 `blob_id`**
+  - 在 `mem-store` 增加 `chunk_index` 与 SQLite `fts5` 虚表，所有文本切片与向量挂载于不可变 `blob_id`。
+  - 实现无外部 Embedding 模型时的纯 FTS5 降级模式，以及可插拔 `EmbeddingProvider` Trait（支持本地 ONNX/OpenAI 兼容接口）。
+- [ ] **2.2 分支隔离过滤与 RRF 混合重排**
+  - 实现高效的当前分支活跃 `blob_id` 视图解析（含 Working Workspace 增量覆盖）。
+  - 实现 BM25 + 向量余弦相似度检索，严格只召回目标 Revision 中可见节点，通过 RRF（Reciprocal Rank Fusion）结合 `importance` 与时效性重排。
+- [ ] **2.3 `/core` 热路径编译器（Hot Compiler）**
+  - 实现 `compile_core(branch, token_budget)`，按重要性与路径确定性拼装可注入 System Prompt 的高密度上下文 Block。
+
+### 验收标准（Exit Criteria）
+1. **分支强隔离验证**：在分支 B 写入特定关键词并提交后，在分支 A 执行 `mem_search` 绝对无法搜出分支 B 的任何内容。
+2. 相同文件跨 50 个分支共享时，Embedding 计算与文本索引只触发 1 次。
+3. 10,000 节点规模下，`/core` 编译耗时 **< 5ms**，纯本地混合检索耗时 **< 30ms**。
+
+---
+
+## Milestone 3: MCP Server、CLI 工具链与三路合并（MCP, CLI & 3-Way Merge）
+
+**阶段目标**：提供立即可用的 `mem` CLI 与 `mem-mcp` Server，支持多 Subagent 分支合并回主干，并接入真实 Coding Agent。
+
+### 核心任务
+- [ ] **3.1 三路合并引擎（Three-Way Merge）**
+  - 实现 Commit DAG 最近公共祖先（LCA）查找算法。
+  - 实现三棵树（`base` / `ours` / `theirs`）自动合并、`/episodic/` 追加合并与同路径冲突结构化报告。
+- [ ] **3.2 `mem-cli` 完整命令行工具**
+  - 交付完整类 Git 体验的 CLI（`init`, `status`, `write`, `read`, `ls`, `commit`, `log`, `branch`, `rewind`, `diff`, `merge`, `search`, `compile`, `gc`）。
+- [ ] **3.3 `mem-mcp` Server & `mem-daemon`**
+  - 实现标准 MCP Server（`stdio` 与 HTTP SSE），完整暴露读、写、搜、分支、回滚、合并工具。
+  - 提供 HTTP REST API 守护进程模式，支撑多进程并发读写 SQLite。
+
+### 验收标准（Exit Criteria）
+1. 能够模拟两个并发 Subagent 在各自独立分支修改不同记忆路径后，无损三路合并回 `main`；修改同一路径时准确检出冲突并保留双侧版本供决策。
+2. Claude Code / Cursor 等 MCP 客户端配置 `mem-mcp` 后，可自主通过工具在会话间保存经验、开分支试错并在出错时回滚记忆。
+
+---
+
+## Milestone 4: SDK 生态、FUSE 挂载与后台整理（SDKs, FUSE & Consolidation）
+
+**阶段目标**：打通主流 AI 开发语言 SDK、可选的 LayerFS 风格 POSIX 目录挂载以及冷路径自动记忆整理能力。
+
+### 核心任务
+- [ ] **4.1 Python / TypeScript 原生 SDK**
+  - 基于 PyO3（Python）或 HTTP Client 提供极简 SDK，方便 LangGraph / CrewAI / 自研 Agent 框架集成。
+- [ ] **4.2 `mem-fuse`（可选 POSIX 挂载视图）**
+  - 基于 `fuser` 将指定 Memory Branch 挂载为本地目录，实现用标准 `ls` / `cat` / `grep` / `vim` 检查和编辑记忆节点，写入后自动映射回 Working Workspace。
+- [ ] **4.3 `mem-consolidate`（后台“睡眠整理”工作流）**
+  - 实现异步整理接口：自动在独立 `consolidate/*` 分支扫描近期 `/episodic/` 轨迹日志，去重压缩并提炼 `/semantic/` 事实与 `/procedural/` SOP，通过后自动 Merge 回 `main`。
+
+### 验收标准（Exit Criteria）
+1. Python Agent 脚本可通过 `import aimemory` 在 5 行代码内完成本地记忆库初始化、分支创建与上下文检索。
+2. 后台整理任务全程运行在隔离分支，即使整理过程中发生异常或结果不理想，也不会污染主干 `main` 记忆，可随时审查 `diff` 后合并或丢弃。
