@@ -3,6 +3,9 @@
 mod audit;
 mod auth;
 mod control;
+mod dav;
+mod dav_commit;
+mod davfs;
 mod error;
 mod http;
 mod keys;

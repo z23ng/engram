@@ -38,5 +38,9 @@ mem-mcp = { path = "crates/mem-mcp" }
 mem-server = { path = "crates/mem-server" }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net"] }
 axum = "0.8.9"
+base64 = "0.22.1"
+bytes = "1.12"
+futures-util = "0.3"
+dav-server = { version = "0.12.0", default-features = false }
 getrandom = "0.4.3"
 tower = { version = "0.5.3", features = ["util"] }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use mem_core::{MemoryNode, Revision, VirtualPath};
 use mem_search::MemSearchEngine;
@@ -14,12 +14,15 @@ use crate::{authorize, Action, ApiKey, ControlPlane, ServerError};
 
 type Shared = Arc<ControlPlane>;
 
-/// REST routes under `/api/v1` and the MCP endpoint `/p/{project}/mcp`.
+/// REST routes under `/api/v1`, the MCP endpoint, and the WebDAV vault endpoint.
 pub fn router(cp: Shared) -> Router {
     Router::new()
         .route("/api/v1/projects/{project}/read", get(read))
         .route("/api/v1/projects/{project}/write", post(write))
         .route("/p/{project}/mcp", post(crate::mcp::mcp))
+        .route("/p/{project}/dav/{branch}", any(crate::dav::dav))
+        .route("/p/{project}/dav/{branch}/", any(crate::dav::dav))
+        .route("/p/{project}/dav/{branch}/{*rest}", any(crate::dav::dav))
         .with_state(cp)
 }
 

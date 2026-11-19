@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use chrono::Utc;
 use mem_search::{ConsolidateLlmConfig, MemSearchEngine};
@@ -8,6 +9,7 @@ use mem_store::SqliteStore;
 use mem_vcs::{MemVcs, VersionControlEngine};
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::dav_commit::DavPending;
 use crate::ServerError;
 
 /// Builds the search engine for an opened project repository.
@@ -31,6 +33,11 @@ pub struct ControlPlane {
     engines: Mutex<HashMap<String, MemSearchEngine>>,
     make_engine: EngineFactory,
     llm_cfg: ConsolidateLlmConfig,
+    pub(crate) dav_delay: Duration,
+    /// Pending WebDAV changes per (project, branch), committed after `dav_delay` of idle time.
+    pub(crate) dav_pending: Mutex<HashMap<(String, String), DavPending>>,
+    /// Empty folders created by MKCOL (project, branch, path); process-local, not persisted.
+    pub(crate) dav_dirs: Mutex<HashSet<(String, String, String)>>,
 }
 
 impl ControlPlane {
@@ -50,6 +57,9 @@ impl ControlPlane {
             engines: Mutex::new(HashMap::new()),
             make_engine,
             llm_cfg: ConsolidateLlmConfig::disabled(),
+            dav_delay: Duration::from_secs(10),
+            dav_pending: Mutex::new(HashMap::new()),
+            dav_dirs: Mutex::new(HashSet::new()),
         };
         Ok((cp, created))
     }
@@ -57,6 +67,12 @@ impl ControlPlane {
     /// Sets the LLM used by `mem_ingest` when a caller passes `use_llm` (default: disabled).
     pub fn with_llm_config(mut self, cfg: ConsolidateLlmConfig) -> Self {
         self.llm_cfg = cfg;
+        self
+    }
+
+    /// Sets the WebDAV idle time before an automatic commit (default: 10s).
+    pub fn with_dav_commit_delay(mut self, delay: Duration) -> Self {
+        self.dav_delay = delay;
         self
     }
 

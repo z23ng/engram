@@ -66,6 +66,15 @@ MCP endpoint behavior (S2):
 - The server overwrites `author` in `mem_commit` / `mem_ingest` with the key name.
 - Audit rows: operation = tool name for successful Write/Branch tool calls, `rest.write` for REST writes; `commit_id` is taken from the tool result when present. `mem admin audit --project <slug> [--limit N]` lists them, newest first.
 
+WebDAV vault behavior (S3):
+
+- URL: `/p/{project}/dav/{branch}/`. In the branch segment, write `/` as `~` (`draft/pm-inbox` -> `draft~pm-inbox`), because dav-server rejects a decoded `/` inside a path segment; git also forbids `~` in ref names. A segment that decodes to `/` returns 400.
+- Auth: HTTP Basic (any username, password = API key) or `Bearer`. Missing or invalid key -> 401 with `WWW-Authenticate: Basic realm="engram"`. Read methods: OPTIONS, PROPFIND, GET, HEAD. Write methods: PUT, DELETE, MKCOL, MOVE, COPY, PROPPATCH, LOCK, UNLOCK (403 for `bot`). Any other method -> 405.
+- Namespace: the root lists only `core/`, `semantic/`, `procedural/`, `episodic/`. Only `.md` files inside a tier are writable; other targets, hidden names, and `_templates` -> 403. PUT body limit 8 MiB -> 413. File mtime = node `updated_at_ms`; ETag = blob id.
+- Folders exist only through files. MKCOL inside a tier succeeds and keeps the empty folder in process memory only (lost on restart).
+- Idle auto-commit: each mutation writes the branch workspace at once; after `dav_commit_delay` (default 10s) without a new DAV mutation on that branch, the server commits once. Author = key name, or `webdav:<a>,<b>` (sorted) for several keys; message `webdav sync: <N> change(s)`. No commit when the workspace has no changes. One audit row `dav.commit` per writer key; single PUTs are not audited. The commit includes any other staged (uncommitted) workspace changes of that branch, for example staged REST or MCP writes.
+- Obsidian (Remotely Save plugin, WebDAV): server address `https://<host>/p/<project>/dav/main/`, any username, password = API key (a `dev` or `pm` key to push, a `bot` key for read-only).
+
 CLI additions: `mem serve --data <dir> --listen <addr>`, `mem admin project create|list`, `mem admin key create|list|revoke`. First start on an empty data directory prints a one-time `admin` key.
 
 ## 6. Crate changes
