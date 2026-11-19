@@ -139,7 +139,7 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
             }
         }),
     );
-    assert_eq!(init_resp["result"]["serverInfo"]["name"], "ai-memory");
+    assert_eq!(init_resp["result"]["serverInfo"]["name"], "engram");
 
     // Notification expects no response.
     writeln!(

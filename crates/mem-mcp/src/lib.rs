@@ -45,7 +45,7 @@ pub fn handle_jsonrpc_request(
                         }
                     },
                     "serverInfo": {
-                        "name": "ai-memory",
+                        "name": "engram",
                         "version": env!("CARGO_PKG_VERSION")
                     }
                 }
