@@ -1,0 +1,21 @@
+[package]
+name = "mem-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mem"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true }
+mem-core = { workspace = true }
+mem-search = { workspace = true }
+mem-store = { workspace = true }
+mem-vcs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

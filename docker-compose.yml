@@ -1,0 +1,34 @@
+services:
+  mem:
+    build: .
+    container_name: ai-memory
+    environment:
+      MEM_DB_PATH: /data/memory.db
+      # Switch between: ollama | openai | disabled
+      MEM_PROVIDER: ${MEM_PROVIDER:-disabled}
+      MEM_EMBEDDING_BASE_URL: ${MEM_EMBEDDING_BASE_URL:-http://ollama:11434/v1}
+      MEM_EMBEDDING_MODEL: ${MEM_EMBEDDING_MODEL:-bge-m3}
+      MEM_EMBEDDING_DIMENSIONS: ${MEM_EMBEDDING_DIMENSIONS:-1024}
+      MEM_LLM_BASE_URL: ${MEM_LLM_BASE_URL:-http://ollama:11434/v1}
+      MEM_LLM_MODEL: ${MEM_LLM_MODEL:-qwen2.5:7b}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - mem_data:/data
+    stdin_open: true
+    tty: true
+    # Override entrypoint command when launching MCP over stdio or CLI diagnostics
+    command: ["doctor"]
+
+  # Optional local Ollama service: start with `docker compose --profile ollama up`
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai-memory-ollama
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  mem_data:
+  ollama_data:

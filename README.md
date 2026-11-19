@@ -1,4 +1,4 @@
-# AI Memory (`mem`)
+# MemVaultTree — AI Memory (`mem`)
 
 受 `Ephemeral-AI-Lab/layerfs` 启发构建的**面向 AI Agent 的版本化结构记忆引擎（Versioned Structured Memory Engine）**——将内容寻址存储（CAS）、Merkle Tree 版本控制与混合检索引擎结合进单文件嵌入式数据库，为 Agent 提供具备“时间旅行”与“分支隔离”能力的大脑。
 
@@ -34,10 +34,39 @@
 - `/semantic/`：结构化知识卡片（项目架构、实体关系、长期事实沉淀）。
 - `/procedural/`：技能与经验记忆（Playbook、SOP、报错避坑指南）。
 
-### 4. 分支感知的混合检索 + 快慢双路径
+### 4. 分支感知 Obsidian 双链图谱混合检索 + Ollama/OpenAI 双态切换
 - **热路径（Hot Path < 5ms）**：无需调用 LLM，直接将当前分支 `/core/` 编译为紧凑的上下文 Block 注入 System Prompt。
-- **分支感知混合检索（Branch-Aware Hybrid Search）**：融合 **SQLite FTS5（BM25 关键词检索）** 与 **向量相似度检索（Vector Search）** 并经 RRF 重排，且严格限定在当前 Branch 的 Merkle Tree 快照视图内，绝不泄露其他未合并分支的脏记忆。
-- **冷路径整理（Cold Consolidation，可选异步）**：任务空闲时在后台分支异步将原始 `/episodic/` 日志去重提炼为 `/semantic/` 事实与 `/procedural/` 经验并原子提交。
+- **Obsidian Wiki-Graph + Mem0 融合检索（`mem-search`）**：融合 **多列加权 FTS5（含 `aliases`/`tags` 与 CJK 支持）**、**向量余弦检索** 与 **1-Hop `[[Wikilink]]` 出链/反向链接/实体图谱扩散** 并经 Graph-RRF 重排，严格限定在当前 Branch 快照视图内，绝不泄露未合并分支或已回滚记忆。
+- **本地 Ollama（开发）与 OpenAI（生产）无缝切换**：`MemConfig::ollama_dev()` 默认对接本地 Ollama（`bge-m3` + `qwen2.5:7b`），上生产后通过 `MemConfig::openai_prod()` 或 `MEM_PROVIDER=openai` 一键切换至 OpenAI（`text-embedding-3-small` + `gpt-4o-mini`），亦支持无模型纯 BM25 + 双链图谱模式运行。
+- **冷路径整理（Cold Consolidation，可选异步）**：任务空闲时在后台隔离分支异步将原始 `/episodic/` 日志提炼为带 `[[双链]]` 的 `/semantic/` 事实卡片与 `/procedural/` SOP。
+
+---
+
+## 快速开始（一键部署）
+
+### 一键部署向导
+```bash
+# 交互式向导（支持本地 Ollama / 生产 OpenAI / 极简 Lite 三种模式）
+./scripts/deploy.sh
+
+# 或直接运行本地演示（自动写入 Obsidian Wiki 示例并执行混合检索与 <5ms 编译）
+./scripts/deploy.sh --mode lite --seed-demo
+# 或使用 Makefile
+make demo
+```
+
+### 从开发态（Ollama）切换至生产态（OpenAI）
+```bash
+# 1. 本地开发（默认 Ollama bge-m3 + qwen2.5:7b）
+./scripts/deploy.sh --mode ollama
+
+# 2. 上线生产（仅切换环境变量或重新生成 mem.env，无需迁移 .db 文件）
+export MEM_PROVIDER=openai
+export OPENAI_API_KEY="sk-..."
+mem doctor
+```
+
+详细配置与 Docker / MCP 客户端接入说明见 [一键部署与运维指南 (docs/DEPLOYMENT.md)](./docs/DEPLOYMENT.md)。
 
 ---
 
@@ -45,6 +74,7 @@
 
 | 文档 | 说明 |
 | :--- | :--- |
+| [一键部署与运维指南 (docs/DEPLOYMENT.md)](./docs/DEPLOYMENT.md) | 交互式/命令行一键部署、Ollama→OpenAI 切换、MCP 接入与 Docker 部署 |
 | [系统架构设计 (docs/ARCHITECTURE.md)](./docs/ARCHITECTURE.md) | 总体分层架构、VFS 命名空间、SQLite CAS/Merkle Schema、核心时序图与合并语义 |
 | [目录结构与模块规划 (docs/DIRECTORY_STRUCTURE.md)](./docs/DIRECTORY_STRUCTURE.md) | Rust Cargo Workspace 规划、SDK 绑定规划与各 Crate 核心 Trait/接口签名 |
 | [开发路线图与里程碑 (docs/ROADMAP.md)](./docs/ROADMAP.md) | M1 至 M4 阶段拆分、核心任务与可量化验收标准 |

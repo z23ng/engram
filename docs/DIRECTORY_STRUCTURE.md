@@ -93,12 +93,14 @@ pub trait VersionControlEngine: Send + Sync {
 ```
 
 ### 2.4 `crates/mem-search`
-- **职责**：提供热路径上下文编译与分支隔离的混合检索能力。
+- **职责**：提供 Obsidian Wiki 图谱解析、分支隔离的 BM25 + Vector + 1-Hop 双链混合检索、`/core` 热路径编译与本地 Vault 导入能力。
 - **核心模块**：
-  - `chunker.rs`：按 Markdown 标题层级与 Token 长度进行语义切分，将 Chunk 关联至 `blob_id`。
-  - `embedder.rs`：抽象 `EmbeddingProvider` Trait（支持本地 ONNX / Ollama / OpenAI 兼容端点，也可纯 BM25 模式零模型运行）。
-  - `hybrid.rs`：并行执行 FTS5 BM25 与向量余弦检索，通过当前分支活跃 `blob_id` 集合严格过滤，再使用 **RRF（Reciprocal Rank Fusion）** 与时间/重要性加权输出 Top-K。
-  - `compiler.rs`：读取 `/core/` 目录节点，按重要性排序与 Token Budget 裁剪，输出确定性的 Prompt Context 字符串。
+  - `config.rs`：`MemConfig`、`ProviderBackend`（`Disabled | Ollama | OpenAi`）、`EmbeddingProviderConfig` 与 `ConsolidateLlmConfig`，支持开发态本地 Ollama 与生产态 OpenAI API 一键切换。
+  - `wiki.rs`：Obsidian Markdown 解析器（YAML Frontmatter `title`/`aliases`/`tags`/`entities`、`[[Wikilinks]]` 提取、标题层级面包屑语义切片）。
+  - `embedder.rs`：`EmbeddingProvider` Trait、Level-1 `NoopEmbedder`、离线 `DeterministicHashEmbedder` 与支持 Ollama/OpenAI 的 `OpenAiCompatibleEmbedder`。
+  - `hybrid.rs`：`MemSearchEngine`，维护挂载于不可变 `blob_id` 的 `chunk_index` / `fts_chunks` / `blob_links`，执行分支隔离的 BM25 + Vector + 1-Hop `[[Wikilink]]`（Outlinks/Backlinks/Entity）扩散与 Graph-RRF 重排。
+  - `compiler.rs`：`compile_core` 读取 `/core/` 目录节点，按 `(importance DESC, path ASC)` 与 Token 预算在 `< 5ms` 内确定性编译上下文。
+  - `vault.rs`：`import_vault` 递归导入本地 Obsidian Markdown 知识库（自动跳过 `.obsidian/`）并构建版本化图谱索引。
 
 ### 2.5 `crates/mem-mcp`
 - **职责**：作为 MCP Server（`stdio` / Streamable HTTP）直接嵌入任意 AI Coding Agent 或个人助手。

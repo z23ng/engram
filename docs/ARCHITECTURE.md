@@ -138,17 +138,43 @@ erDiagram
     }
 
     CHUNK_INDEX {
-        string chunk_id PK
-        string blob_id FK "Content-addressed chunk"
-        int chunk_seq
-        string chunk_text "Indexed by FTS5"
-        blob embedding "Float32 vector for sqlite-vec"
+        string blob_id PK "FK -> blobs.blob_id"
+        int chunk_seq PK
+        string title
+        string aliases
+        string tags
+        string heading_path "e.g. # Storage > ## WAL"
+        string chunk_text "Breadcrumb-enriched text"
+        string raw_snippet
+        int start_line
+        int end_line
+        blob embedding "Float32 little-endian vector"
+    }
+
+    FTS_CHUNKS {
+        string blob_id "UNINDEXED"
+        int chunk_seq "UNINDEXED"
+        string title "BM25 weight 5.0"
+        string aliases "BM25 weight 5.0"
+        string tags "BM25 weight 3.0"
+        string heading_path "BM25 weight 2.0"
+        string chunk_text "BM25 weight 1.0 (unicode61 + CJK bigrams)"
+    }
+
+    BLOB_LINKS {
+        string source_blob_id PK "FK -> blobs.blob_id"
+        string link_kind PK "wikilink | tag | entity_rel"
+        string source_entity PK
+        string relation PK
+        string target_ref PK
     }
 
     REFS }o--|| COMMITS : points_to
     COMMITS }o--|| TREES : root
     TREES }o--o| BLOBS : leaf_blob
     BLOBS ||--o{ CHUNK_INDEX : indexed_into
+    BLOBS ||--o{ FTS_CHUNKS : tokenized_into
+    BLOBS ||--o{ BLOB_LINKS : links_from
 ```
 
 ### 3.2 关键设计优势
@@ -212,22 +238,49 @@ sequenceDiagram
 
 ---
 
-## 5. 分支感知混合检索流程（`mem-search`）
+## 5. 分支感知混合检索与 Obsidian Wiki 图谱引擎（`mem-search`）
+
+为了克服纯切片 RAG 的“碎纸机效应”和词汇鸿沟，系统将 **Obsidian Wiki 双链图谱** 与 **Mem0 式原子事实/实体关系** 融合于不可变 `blob_id` 之上：
+
+1. **Obsidian 结构解析与面包屑切片（`wiki.rs`）**：
+   - 解析 YAML Frontmatter 中的 `title`、`aliases`（同义词/缩写）、`tags`、`entities`（如 `"SQLite -> uses -> WAL Mode"`）与 `importance`。
+   - 自动抽取正文中的 `[[Wikilinks]]`、`[[target|alias]]`、`[[target#section]]` 与行内 `#tags`（自动跳过代码块与行内代码）。
+   - 切分 Chunk 时自动前置注入结构化面包屑头部：`[Title: ... | Aliases: ... | Tags: ... | Section: # H1 > ## H2]`，确保每个切片在 BM25 与向量空间均保留完整上下文锚点。
+2. **四路分支感知 Graph-RRF 混合检索（`hybrid.rs`）**：
 
 ```mermaid
 flowchart LR
-    Query["Query + Branch + Path Prefix + TopK"] --> Resolve["Resolve Active Tree (Committed + Working Overlay)"]
-    Resolve --> ActiveBlobs["Active (path -> blob_id) Map"]
+    Query["Query + Revision + Path Prefix + TopK"] --> Resolve["1. 解析当前分支活跃视图 (Active path -> blob_id)"]
+    Resolve --> WikiDict["构建分支内 Wiki 符号表 (path / stem / title / aliases)"]
 
-    Query --> BM25["SQLite FTS5 BM25 Search"]
-    Query --> Embed["Query Embedding -> Vector Cosine Search"]
+    Query --> BM25["2a. FTS5 多列加权 BM25\ntitle(x5) | aliases(x5) | tags(x3) | heading(x2) | text(x1)"]
+    Query --> Embed["2b. Embedding 向量余弦检索\n(Ollama bge-m3 / OpenAI / 无模型降级)"]
 
-    ActiveBlobs --> Filter["Filter Chunks by Active blob_ids & Path Prefix"]
-    BM25 --> Filter
-    Embed --> Filter
+    Resolve --> ActiveFilter["严格限定 _mem_active_blobs 白名单"]
+    BM25 --> ActiveFilter
+    Embed --> ActiveFilter
 
-    Filter --> RRF["Reciprocal Rank Fusion (RRF) + Importance Decay Boost"]
-    RRF --> Output["Ranked Memory Snippets with Path, Commit & Line Citations"]
+    ActiveFilter --> GraphHop["3. Obsidian 双链 1-Hop 图谱扩散\n(Outlinks + Backlinks + Entity 共享边)"]
+    WikiDict --> GraphHop
+    GraphHop --> RRF["4. Graph-RRF 融合 + Importance 加权"]
+    RRF --> Output["Top-K 片段 + 行号 + Outlinks / Backlinks 导航提示"]
 ```
 
-- **热路径（`/core/` Compiler）**：读取当前 Branch `/core/` 下全部节点，按优先级与 Token 预算截断拼接为确定性的 Markdown/XML 上下文块，全程仅查内存缓存或本地 SQLite 主键，耗时 **< 5ms**。
+- **热路径（`/core/` Compiler）**：读取当前 Branch `/core/` 下全部节点，按 `(importance DESC, path ASC)` 与 `max_tokens` 预算确定性拼接为 `<core_memory>` 上下文块，耗时 **< 5ms**，全程零 LLM 调用。
+- **本地 Obsidian 知识库导入（`vault.rs`）**：`import_vault` 自动跳过 `.obsidian/` 等隐藏目录，将本地 `.md` 知识库批量导入目标分支并构建双链图谱与混合索引。
+
+---
+
+## 6. 统一 OpenAI 兼容模型配置（本地 Ollama 开发 / OpenAI 生产切换）
+
+系统所有向量化（Embedding）与冷路径记忆提炼（Consolidation LLM）均采用统一的 **OpenAI-Compatible HTTP 协议**，并内置三级渐进降级能力：
+
+| 运行档位 / 场景 | Embedding 配置 (`EmbeddingProviderConfig`) | 冷路径 Mem0 提炼 LLM (`ConsolidateLlmConfig`) | 适用说明 |
+| :--- | :--- | :--- | :--- |
+| **Level 1：纯本地零模型降级** | `ProviderBackend::Disabled` (`NoopEmbedder`) | `ProviderBackend::Disabled` | 零外部进程与显卡要求，靠多列加权 FTS5 + Obsidian `[[双链]]` 1-Hop 图谱即可精准召回 |
+| **开发 / 离线本地部署 (Ollama)** | `backend = "ollama"`<br>`base_url = "http://127.0.0.1:11434/v1"`<br>`model = "bge-m3"` (`dimensions = 1024`) | `backend = "ollama"`<br>`base_url = "http://127.0.0.1:11434/v1"`<br>`model = "qwen2.5:7b"` | 本地 RTX GPU / Apple Silicon 离线免费运行，默认开发环境预设（`MemConfig::ollama_dev()`） |
+| **生产环境部署 (OpenAI API)** | `backend = "openai"`<br>`base_url = "https://api.openai.com/v1"`<br>`model = "text-embedding-3-small"` (`dimensions = 1536`) | `backend = "openai"`<br>`base_url = "https://api.openai.com/v1"`<br>`model = "gpt-4o-mini"` | 生产环境零本地显存占用，仅需切换配置或设置环境变量（`MemConfig::openai_prod(key)`） |
+
+环境变量无缝切换方式：
+- 本地开发（默认）：`MEM_PROVIDER=ollama`
+- 上线生产：`MEM_PROVIDER=openai` + `OPENAI_API_KEY=sk-...`（可选 `MEM_EMBEDDING_MODEL`、`MEM_EMBEDDING_DIMENSIONS`、`MEM_LLM_MODEL` 覆盖默认值）

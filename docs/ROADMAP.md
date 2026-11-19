@@ -9,17 +9,17 @@
 **阶段目标**：完成类似 LayerFS 核心的嵌入式 SQLite 内容寻址存储与 Merkle Tree 版本控制引擎，跑通零拷贝分支、回滚与 Diff。
 
 ### 核心任务
-- [ ] **1.1 初始化 Rust Workspace 与 `mem-core`**
+- [x] **1.1 初始化 Rust Workspace 与 `mem-core`**
   - 建立 Workspace 结构，定义 `VirtualPath`（严格路径规范化与 `MemoryTier` 解析）、`BlobId`、`TreeId`、`CommitId`、`MemoryNode`。
-- [ ] **1.2 `mem-store` SQLite CAS 底座**
-  - 配置 `rusqlite`（bundled SQLite + WAL 模式），建表 `blobs`、`trees`、`commits`、`refs`、`workspace_entries`。
+- [x] **1.2 `mem-store` SQLite CAS 底座**
+  - 配置 `rusqlite`（bundled SQLite + WAL 模式），建表 `blobs`、`tree_objects`、`trees`、`commits`、`refs`、`workspace_entries`。
   - 实现基于 **BLAKE3 + zstd** 的内容寻址写入去重与读取。
-- [ ] **1.3 `mem-vcs` 核心版本操作**
+- [x] **1.3 `mem-vcs` 核心版本操作**
   - 实现按分支隔离的 Working Workspace 读写（`write`、`delete`、`read`、`list`）。
   - 实现 Merkle Tree 自底向上构造与 `commit` 不可变快照提交。
-  - 实现 `create_branch`（零拷贝分支）、`rewind`（原子回滚分支指针并丢弃脏暂存区）、`log` 与 `diff`（利用 Merkle Tree 子树哈希快速剪枝比对）。
-- [ ] **1.4 不可达对象垃圾回收（Mark & Sweep GC）**
-  - 实现从所有 `refs` 出发遍历可达 `commits -> trees -> blobs`，安全清理被 `rewind` 或删除分支遗弃的孤儿数据。
+  - 实现 `create_branch`（零拷贝分支）、`rewind`（原子回滚分支指针并丢弃脏暂存区）、`log`、`diff`（利用 Merkle Tree 子树哈希快速剪枝比对）与基础三路合并。
+- [x] **1.4 不可达对象垃圾回收（Mark & Sweep GC）**
+  - 实现从所有 `refs` 与暂存区出发遍历可达 `commits -> trees -> blobs`，安全清理被 `rewind` 或删除分支遗弃的孤儿数据（含 `fts_chunks` 清理）。
 
 ### 验收标准（Exit Criteria）
 1. 相同内容重复写入不同路径或分支时，`blobs` 表仅存一份物理记录。
@@ -33,14 +33,15 @@
 **阶段目标**：在不依赖外部向量库的前提下，构建严格受 Branch 视图隔离的 BM25 + Vector 混合检索引擎及 `<5ms` `/core` 上下文编译器。
 
 ### 核心任务
-- [ ] **2.1 内容切分与索引表挂载到 `blob_id`**
-  - 在 `mem-store` 增加 `chunk_index` 与 SQLite `fts5` 虚表，所有文本切片与向量挂载于不可变 `blob_id`。
-  - 实现无外部 Embedding 模型时的纯 FTS5 降级模式，以及可插拔 `EmbeddingProvider` Trait（支持本地 ONNX/OpenAI 兼容接口）。
-- [ ] **2.2 分支隔离过滤与 RRF 混合重排**
-  - 实现高效的当前分支活跃 `blob_id` 视图解析（含 Working Workspace 增量覆盖）。
-  - 实现 BM25 + 向量余弦相似度检索，严格只召回目标 Revision 中可见节点，通过 RRF（Reciprocal Rank Fusion）结合 `importance` 与时效性重排。
-- [ ] **2.3 `/core` 热路径编译器（Hot Compiler）**
-  - 实现 `compile_core(branch, token_budget)`，按重要性与路径确定性拼装可注入 System Prompt 的高密度上下文 Block。
+- [x] **2.1 内容切分与 Obsidian Wiki 图谱表挂载到 `blob_id`**
+  - 在 `mem-store` 增加 `chunk_index`、SQLite `fts5` 虚表（`fts_chunks`）及双链/实体关系图谱表（`blob_links`），所有文本切片、向量与图谱边严格挂载于不可变 `blob_id`。
+  - 实现 Obsidian Wiki 解析器（YAML Frontmatter `aliases`/`tags`/`entities`、标题层级面包屑切片、`[[Wikilinks]]` 提取）及本地 Obsidian Vault 导入器 `import_vault`。
+  - 实现可插拔 `EmbeddingProvider` Trait、Level-1 无模型降级（`NoopEmbedder`）与统一 OpenAI 兼容客户端（开发态默认本地 Ollama `bge-m3`，生产态切换 OpenAI `text-embedding-3-small`）。
+- [x] **2.2 分支隔离过滤、双链 1-Hop 图谱扩散与 Graph-RRF 混合重排**
+  - 实现高效的当前分支活跃 `blob_id` 视图解析（含 Working Workspace 增量覆盖与分支内 Wiki 目标符号表）。
+  - 实现多列加权 FTS5 BM25（含 CJK 双字索引）+ 向量余弦相似度检索 + Obsidian 1-Hop `[[Wikilink]]`（Outlinks/Backlinks/Entity）图谱扩散，通过 Graph-RRF 结合 `importance` 重排输出。
+- [x] **2.3 `/core` 热路径编译器（Hot Compiler）**
+  - 实现 `compile_core(rev, max_tokens)`，按 `(importance DESC, path ASC)` 确定性拼装可注入 System Prompt 的 `<core_memory>` 上下文 Block。
 
 ### 验收标准（Exit Criteria）
 1. **分支强隔离验证**：在分支 B 写入特定关键词并提交后，在分支 A 执行 `mem_search` 绝对无法搜出分支 B 的任何内容。
