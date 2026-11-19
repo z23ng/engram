@@ -59,6 +59,10 @@ pub fn cmd_serve(opts: &GlobalOpts, args: &[String]) -> CmdResult {
             .map_err(|e| e.to_string())?;
         println!("admin key (shown once): {plain}");
     }
+    let leftovers = cp.commit_leftovers().map_err(|e| e.to_string())?;
+    if leftovers > 0 {
+        println!("committed leftover workspace changes on {leftovers} branch(es)");
+    }
     mem_server::run_server(Arc::new(cp), &listen).map_err(|e| e.to_string())?;
     Ok(ExitCode::SUCCESS)
 }

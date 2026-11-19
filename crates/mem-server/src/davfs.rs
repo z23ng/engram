@@ -98,10 +98,40 @@ fn to_vpath(segs: &[String]) -> FsResult<VirtualPath> {
     VirtualPath::new(format!("/{}", segs.join("/"))).map_err(|_| FsError::Forbidden)
 }
 
-/// Writable target: a `.md` file below a tier folder. Everything else is forbidden.
-fn md_file(path: &DavPath) -> FsResult<VirtualPath> {
+const IMAGES: [(&str, &str); 5] = [
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+];
+
+/// Content type of an allowed image name; SVG is excluded because it can carry scripts.
+fn image_type(name: &str) -> Option<&'static str> {
+    let (_, ext) = name.rsplit_once('.')?;
+    IMAGES
+        .iter()
+        .find(|(e, _)| ext.eq_ignore_ascii_case(e))
+        .map(|(_, t)| *t)
+}
+
+/// Writable target: a `.md` file below a tier folder, or an image below
+/// `<tier>/_attachments/` for every tier except `core`. Everything else is forbidden.
+fn writable(segs: &[String]) -> bool {
+    let Some(name) = segs.last() else {
+        return false;
+    };
+    let md = segs.len() >= 2 && name.ends_with(".md");
+    let image = segs.len() >= 3
+        && segs[0] != "core"
+        && segs[1] == "_attachments"
+        && image_type(name).is_some();
+    in_tier(segs) && (md || image)
+}
+
+fn file_target(path: &DavPath) -> FsResult<VirtualPath> {
     let segs = segments(path);
-    if segs.len() >= 2 && in_tier(&segs) && segs.last().is_some_and(|s| s.ends_with(".md")) {
+    if writable(&segs) {
         to_vpath(&segs)
     } else {
         Err(FsError::Forbidden)
@@ -249,16 +279,27 @@ impl BranchFs {
         Ok(out.into_iter().collect())
     }
 
+    /// Every DAV write (PUT, COPY, MOVE) passes this check; images are stored raw, not indexed.
     fn write_file(&self, vp: &VirtualPath, content: Vec<u8>) -> FsResult<()> {
-        let node = MemoryNode::new(vp.clone(), content);
+        let segs: Vec<String> = vp.as_str().split('/').skip(1).map(String::from).collect();
+        if !writable(&segs) {
+            return Err(FsError::Forbidden);
+        }
+        let mut node = MemoryNode::new(vp.clone(), content);
+        let image = image_type(vp.as_str());
+        if let Some(content_type) = image {
+            node.metadata.content_type = content_type.into();
+        }
         let blob_id = self
             .engine
             .vcs()
             .write_node(&self.branch, node)
             .map_err(fs_err)?;
-        self.engine
-            .index_blob_if_needed(vp, &blob_id)
-            .map_err(fs_err)?;
+        if image.is_none() {
+            self.engine
+                .index_blob_if_needed(vp, &blob_id)
+                .map_err(fs_err)?;
+        }
         Ok(())
     }
 
@@ -277,7 +318,7 @@ impl BranchFs {
             return Ok(1);
         }
         let base = format!("{}/", src.as_str());
-        let mut copied = 0;
+        let mut copies = Vec::new();
         for (path, _, _) in self
             .engine
             .vcs()
@@ -290,12 +331,22 @@ impl BranchFs {
             if let Some(node) = self.read_node(&path)? {
                 let target =
                     VirtualPath::new(format!("{}/{rest}", dst.as_str())).map_err(fs_err)?;
-                self.write_file(&target, node.content)?;
-                copied += 1;
+                copies.push((target, node.content));
             }
         }
-        if copied == 0 {
+        if copies.is_empty() {
             return Err(FsError::NotFound);
+        }
+        // Check every target first so a forbidden file does not leave a partial copy.
+        let target_segs = |p: &VirtualPath| -> Vec<String> {
+            p.as_str().split('/').skip(1).map(String::from).collect()
+        };
+        if !copies.iter().all(|(p, _)| writable(&target_segs(p))) {
+            return Err(FsError::Forbidden);
+        }
+        let copied = copies.len();
+        for (target, content) in copies {
+            self.write_file(&target, content)?;
         }
         Ok(copied)
     }
@@ -317,7 +368,7 @@ impl DavFileSystem for BranchFs {
                 if options.append {
                     return Err(FsError::NotImplemented);
                 }
-                let vp = md_file(path)?;
+                let vp = file_target(path)?;
                 if options.size.is_some_and(|s| s > MAX_FILE as u64) {
                     return Err(FsError::TooLarge);
                 }
@@ -397,7 +448,7 @@ impl DavFileSystem for BranchFs {
 
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let vp = md_file(path).map_err(|_| FsError::NotFound)?;
+            let vp = file_target(path).map_err(|_| FsError::NotFound)?;
             let fs = self.clone();
             if blocking(move || fs.delete(&vp)).await? == 0 {
                 return Err(FsError::NotFound);
@@ -435,8 +486,11 @@ impl DavFileSystem for BranchFs {
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
             let (src, dst) = (segments(from), segments(to));
-            let is_file = md_file(from).is_ok();
-            if (is_file && md_file(to).is_err()) || dst.len() < 2 || !in_tier(&dst) || src.len() < 2
+            let is_file = file_target(from).is_ok();
+            if (is_file && file_target(to).is_err())
+                || dst.len() < 2
+                || !in_tier(&dst)
+                || src.len() < 2
             {
                 return Err(FsError::Forbidden);
             }
@@ -454,7 +508,7 @@ impl DavFileSystem for BranchFs {
 
     fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            md_file(to)?;
+            file_target(to)?;
             let (src, dst) = (segments(from), segments(to));
             let fs = self.clone();
             blocking(move || fs.copy_tree(&src, &dst)).await?;

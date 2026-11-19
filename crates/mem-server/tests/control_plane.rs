@@ -102,3 +102,33 @@ fn plaintext_key_is_never_stored() {
         assert!(!bytes.windows(plain.len()).any(|w| w == plain.as_bytes()));
     }
 }
+
+#[test]
+fn commit_leftovers_commits_only_dirty_branches_once() {
+    use mem_core::{MemoryNode, Revision, VirtualPath};
+    use mem_vcs::VersionControlEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let (cp, _) = open(dir.path());
+    cp.create_project("alpha").unwrap();
+    let vcs = cp.engine("alpha").unwrap().vcs().clone();
+    vcs.create_branch("clean", &Revision::BranchHead("main".into()))
+        .unwrap();
+    let path = VirtualPath::new("/semantic/left.md").unwrap();
+    vcs.write_node("main", MemoryNode::new(path, b"left".to_vec()))
+        .unwrap();
+
+    assert_eq!(cp.commit_leftovers().unwrap(), 1);
+    let log = vcs.log("main", 10).unwrap();
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].author, "system:startup");
+    assert_eq!(log[0].message, "startup: commit 1 leftover change(s)");
+    assert_eq!(vcs.log("clean", 10).unwrap().len(), 1);
+    let audit = cp.list_audit("alpha", 10).unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].operation, "startup.commit");
+    assert_eq!(
+        audit[0].commit_id.as_deref(),
+        Some(log[0].commit_id.to_hex().as_str())
+    );
+    assert_eq!(cp.commit_leftovers().unwrap(), 0);
+}

@@ -482,3 +482,69 @@ async fn mkcol_rules_and_lock_permissions() {
     .await;
     assert_eq!(bot_lock.status, StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn image_attachments_are_stored_raw_outside_core() {
+    let f = fixture();
+    let k = key(&f, "pm", Role::Pm);
+    let png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+    let ok = dav(
+        &f,
+        "PUT",
+        "/p/alpha/dav/main/semantic/_attachments/a.png",
+        Some(&k),
+        &[],
+        png.clone(),
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::CREATED);
+    let vp = VirtualPath::new("/semantic/_attachments/a.png").unwrap();
+    let rev = Revision::BranchWorkspace("main".into());
+    let node =
+        f.cp.engine("alpha")
+            .unwrap()
+            .vcs()
+            .read(&rev, &vp)
+            .unwrap()
+            .unwrap();
+    assert_eq!(node.content, png);
+    assert_eq!(node.metadata.content_type, "image/png");
+    let got = get(&f, "/p/alpha/dav/main/semantic/_attachments/a.png", &k).await;
+    assert_eq!(got.status, StatusCode::OK);
+    for denied in [
+        "/p/alpha/dav/main/core/_attachments/a.png",
+        "/p/alpha/dav/main/semantic/_attachments/a.svg",
+        "/p/alpha/dav/main/semantic/_attachments/a.md.exe",
+        "/p/alpha/dav/main/semantic/sub/_attachments/a.png",
+    ] {
+        let r = dav(&f, "PUT", denied, Some(&k), &[], png.clone()).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{denied}");
+    }
+    let dest = [(
+        "destination",
+        "http://localhost/p/alpha/dav/main/semantic/pics/",
+    )];
+    let mv = dav(
+        &f,
+        "MOVE",
+        "/p/alpha/dav/main/semantic/_attachments/",
+        Some(&k),
+        &dest,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        mv.status,
+        StatusCode::FORBIDDEN,
+        "folder MOVE must not place images outside _attachments"
+    );
+    let moved = VirtualPath::new("/semantic/pics/a.png").unwrap();
+    assert!(f
+        .cp
+        .engine("alpha")
+        .unwrap()
+        .vcs()
+        .read(&rev, &moved)
+        .unwrap()
+        .is_none());
+}

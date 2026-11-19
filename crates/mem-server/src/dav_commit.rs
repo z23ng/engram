@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use mem_vcs::VersionControlEngine;
 
-use crate::{ApiKey, ControlPlane, ServerError};
+use crate::{ApiKey, ControlPlane, Role, ServerError};
 
 /// WebDAV changes on one branch that wait for the idle commit.
 #[derive(Default)]
@@ -15,6 +15,37 @@ pub(crate) struct DavPending {
 }
 
 impl ControlPlane {
+    /// Commits every branch whose workspace still holds changes, for example after a restart
+    /// inside the WebDAV idle window. Returns the number of commits.
+    pub fn commit_leftovers(&self) -> Result<usize, ServerError> {
+        let system = ApiKey {
+            id: 0,
+            name: "system:startup".into(),
+            role: Role::Admin,
+            projects: None,
+            expires_at_ms: None,
+            revoked: false,
+        };
+        let mut commits = 0;
+        for project in self.list_projects()? {
+            let engine = self.engine(&project)?;
+            for (branch, _) in engine.vcs().store().list_refs()? {
+                let changes = engine.vcs().store().workspace_list(&branch)?.len();
+                if changes == 0 {
+                    continue;
+                }
+                let message = format!("startup: commit {changes} leftover change(s)");
+                let id = engine
+                    .vcs()
+                    .commit(&branch, &system.name, &message)?
+                    .to_hex();
+                self.record_audit(&system, &project, "startup.commit", Some(&id))?;
+                commits += 1;
+            }
+        }
+        Ok(commits)
+    }
+
     /// Records one WebDAV change and (re)starts the idle timer of `(project, branch)`.
     pub(crate) fn note_dav_change(self: &Arc<Self>, project: &str, branch: &str, key: &ApiKey) {
         let slot = (project.to_string(), branch.to_string());
