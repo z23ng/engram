@@ -22,13 +22,7 @@ pub fn put_blob_conn(conn: &Connection, raw_bytes: &[u8], content_type: &str) ->
     conn.execute(
         "INSERT OR IGNORE INTO blobs (blob_id, content, raw_size, content_type, created_at_ms)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            blob_id.to_hex(),
-            compressed,
-            raw_size,
-            content_type,
-            now_ms
-        ],
+        params![blob_id.to_hex(), compressed, raw_size, content_type, now_ms],
     )
     .map_err(|e| MemError::Storage(format!("failed to insert blob: {e}")))?;
 

@@ -62,7 +62,9 @@ impl ControlPlane {
     pub fn create_project(&self, slug: &str) -> Result<(), ServerError> {
         validate_slug(slug)?;
         if self.project_exists(slug)? {
-            return Err(ServerError::BadRequest(format!("project '{slug}' already exists")));
+            return Err(ServerError::BadRequest(format!(
+                "project '{slug}' already exists"
+            )));
         }
         MemVcs::new(SqliteStore::open(self.project_db(slug))?).init()?;
         self.db()?.execute(
@@ -82,7 +84,9 @@ impl ControlPlane {
     /// Returns the cached engine of an existing project, opening it on first use.
     pub fn engine(&self, slug: &str) -> Result<MemSearchEngine, ServerError> {
         if !self.project_exists(slug)? {
-            return Err(ServerError::NotFound(format!("project '{slug}' does not exist")));
+            return Err(ServerError::NotFound(format!(
+                "project '{slug}' does not exist"
+            )));
         }
         let mut engines = self
             .engines
@@ -112,11 +116,15 @@ impl ControlPlane {
 /// Accepts `[a-z0-9][a-z0-9-]{0,62}`, which also rules out path traversal.
 pub(crate) fn validate_slug(slug: &str) -> Result<(), ServerError> {
     let ok = (1..=63).contains(&slug.len())
-        && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !slug.starts_with('-');
     if ok {
         Ok(())
     } else {
-        Err(ServerError::BadRequest(format!("invalid project slug '{slug}'")))
+        Err(ServerError::BadRequest(format!(
+            "invalid project slug '{slug}'"
+        )))
     }
 }

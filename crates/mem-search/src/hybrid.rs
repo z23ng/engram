@@ -17,9 +17,7 @@ use crate::embedder::{
     cosine_similarity_le_bytes, encode_f32_vec, EmbeddingProvider, NoopEmbedder,
 };
 use crate::ingest::{ingest_knowledge, IngestOutcome, IngestRequest};
-use crate::vault::{
-    export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats,
-};
+use crate::vault::{export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats};
 use crate::wiki::{parse_wiki_document, ParsedWikiDocument};
 
 /// Query parameters for branch-isolated hybrid search.
@@ -133,11 +131,7 @@ impl MemSearchEngine {
     }
 
     /// Creates a hybrid search engine with a custom [`EmbeddingProvider`] and [`SearchConfig`].
-    pub fn new(
-        vcs: MemVcs,
-        embedder: Arc<dyn EmbeddingProvider>,
-        config: SearchConfig,
-    ) -> Self {
+    pub fn new(vcs: MemVcs, embedder: Arc<dyn EmbeddingProvider>, config: SearchConfig) -> Self {
         Self {
             vcs,
             embedder,
@@ -470,7 +464,12 @@ impl MemSearchEngine {
             title_by_blob.insert(*blob_id, header.title.clone());
             if let Some(paths) = paths_by_blob.get(blob_id) {
                 for path in paths {
-                    register_resolver_keys(&mut wiki_resolver, path, &header.title, &header.aliases);
+                    register_resolver_keys(
+                        &mut wiki_resolver,
+                        path,
+                        &header.title,
+                        &header.aliases,
+                    );
                 }
             }
         }
@@ -725,10 +724,8 @@ impl MemSearchEngine {
         scored.truncate(req.top_k);
 
         // 11. Fetch chunk snippets for the winning top_k candidates.
-        let chunk_keys: Vec<(BlobId, usize)> = scored
-            .iter()
-            .map(|c| (c.blob_id, c.chunk_seq))
-            .collect();
+        let chunk_keys: Vec<(BlobId, usize)> =
+            scored.iter().map(|c| (c.blob_id, c.chunk_seq)).collect();
         let chunk_details = self
             .vcs
             .store()
@@ -780,11 +777,7 @@ impl MemSearchEngine {
     }
 
     /// Compiles `/core` memories for `rev` within `max_tokens` in `< 5ms` without LLM calls.
-    pub fn compile_core(
-        &self,
-        rev: &Revision,
-        max_tokens: usize,
-    ) -> Result<CompiledCoreContext> {
+    pub fn compile_core(&self, rev: &Revision, max_tokens: usize) -> Result<CompiledCoreContext> {
         compile_core(&self.vcs, rev, max_tokens)
     }
 
@@ -937,13 +930,16 @@ fn load_active_search_data(
                 )
                 .map_err(|e| MemError::Storage(format!("failed to prepare FTS5 query: {e}")))?;
             let rows = stmt
-                .query_map(params![fts_query, i64::try_from(fts_limit).unwrap_or(100)], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, f64>(2)?,
-                    ))
-                })
+                .query_map(
+                    params![fts_query, i64::try_from(fts_limit).unwrap_or(100)],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, f64>(2)?,
+                        ))
+                    },
+                )
                 .map_err(|e| MemError::Storage(format!("failed to execute FTS5 query: {e}")))?;
             for row in rows {
                 let (hex, seq, score) =
@@ -985,7 +981,9 @@ fn load_active_search_data(
                     ))
                 })
                 .map_err(|e| {
-                    MemError::Storage(format!("failed to query active chunks for lexical scan: {e}"))
+                    MemError::Storage(format!(
+                        "failed to query active chunks for lexical scan: {e}"
+                    ))
                 })?;
 
             let mut scored_lex: Vec<(BlobId, usize, f32)> = Vec::new();
@@ -993,7 +991,8 @@ fn load_active_search_data(
                 let (hex, seq, title, aliases, tags, heading, body) = row.map_err(|e| {
                     MemError::Storage(format!("failed to decode lexical fallback row: {e}"))
                 })?;
-                let lex_score = score_lexical_match(query, &title, &aliases, &tags, &heading, &body);
+                let lex_score =
+                    score_lexical_match(query, &title, &aliases, &tags, &heading, &body);
                 if lex_score > 0.0 {
                     scored_lex.push((
                         BlobId::from_hex(&hex)?,
@@ -1084,10 +1083,12 @@ fn load_active_search_data(
                         r.get::<_, String>(3)?,
                     ))
                 })
-                .map_err(|e| MemError::Storage(format!("failed to query active blob_links: {e}")))?;
+                .map_err(|e| {
+                    MemError::Storage(format!("failed to query active blob_links: {e}"))
+                })?;
             for row in rows {
-                let (hex, kind, source_entity, target_ref) = row
-                    .map_err(|e| MemError::Storage(format!("failed to decode link row: {e}")))?;
+                let (hex, kind, source_entity, target_ref) =
+                    row.map_err(|e| MemError::Storage(format!("failed to decode link row: {e}")))?;
                 links.push(ActiveLinkRow {
                     source_blob_id: BlobId::from_hex(&hex)?,
                     link_kind: kind,
@@ -1127,16 +1128,15 @@ fn fetch_chunk_details(
             continue;
         }
         let seq_i64 = i64::try_from(seq).unwrap_or(0);
-        let row = stmt
-            .query_row(params![blob_id.to_hex(), seq_i64], |r| {
-                Ok(ChunkDetail {
-                    title: r.get(0)?,
-                    heading_path: r.get(1)?,
-                    raw_snippet: r.get(2)?,
-                    start_line: usize::try_from(r.get::<_, i64>(3)?.max(1)).unwrap_or(1),
-                    end_line: usize::try_from(r.get::<_, i64>(4)?.max(1)).unwrap_or(1),
-                })
-            });
+        let row = stmt.query_row(params![blob_id.to_hex(), seq_i64], |r| {
+            Ok(ChunkDetail {
+                title: r.get(0)?,
+                heading_path: r.get(1)?,
+                raw_snippet: r.get(2)?,
+                start_line: usize::try_from(r.get::<_, i64>(3)?.max(1)).unwrap_or(1),
+                end_line: usize::try_from(r.get::<_, i64>(4)?.max(1)).unwrap_or(1),
+            })
+        });
         if let Ok(detail) = row {
             out.insert((blob_id, seq), detail);
         }

@@ -36,9 +36,7 @@ impl WorkspaceOp {
         match raw {
             "upsert" => Ok(Self::Upsert),
             "delete" => Ok(Self::Delete),
-            other => Err(MemError::Storage(format!(
-                "invalid workspace op '{other}'"
-            ))),
+            other => Err(MemError::Storage(format!("invalid workspace op '{other}'"))),
         }
     }
 }
@@ -223,7 +221,11 @@ impl SqliteStore {
     }
 
     /// Retrieves a single staged entry from `branch`'s working workspace.
-    pub fn workspace_get(&self, branch: &str, path: &VirtualPath) -> Result<Option<WorkspaceEntry>> {
+    pub fn workspace_get(
+        &self,
+        branch: &str,
+        path: &VirtualPath,
+    ) -> Result<Option<WorkspaceEntry>> {
         self.with_conn(|conn| workspace_get_conn(conn, branch, path))
     }
 
@@ -490,7 +492,9 @@ pub fn get_ref_conn(conn: &Connection, name: &str) -> Result<Option<CommitId>> {
         .optional()
         .map_err(|e| MemError::Storage(format!("failed to query ref '{name}': {e}")))?;
 
-    target.map(|hex_str| CommitId::from_hex(&hex_str)).transpose()
+    target
+        .map(|hex_str| CommitId::from_hex(&hex_str))
+        .transpose()
 }
 
 /// Lists all branch references sorted by name using an existing connection.
@@ -669,7 +673,9 @@ pub fn workspace_list_descendants_conn(
                 r.get::<_, i64>(4)?,
             ))
         })
-        .map_err(|e| MemError::Storage(format!("failed to query descendant workspace entries: {e}")))?;
+        .map_err(|e| {
+            MemError::Storage(format!("failed to query descendant workspace entries: {e}"))
+        })?;
 
     let mut out = Vec::new();
     for row in rows {
@@ -716,8 +722,12 @@ mod tests {
             .unwrap();
         assert_eq!(journal_mode.to_lowercase(), "wal");
 
-        let id1 = store.put_blob(b"same memory payload", "text/markdown").unwrap();
-        let id2 = store.put_blob(b"same memory payload", "text/markdown").unwrap();
+        let id1 = store
+            .put_blob(b"same memory payload", "text/markdown")
+            .unwrap();
+        let id2 = store
+            .put_blob(b"same memory payload", "text/markdown")
+            .unwrap();
         assert_eq!(id1, id2);
         assert_eq!(store.blob_count().unwrap(), 1);
         assert!(store.has_blob(&id1).unwrap());
@@ -749,7 +759,11 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(
-            store.get_tree_entry(&tree_id, "rules.md").unwrap().unwrap().child_id,
+            store
+                .get_tree_entry(&tree_id, "rules.md")
+                .unwrap()
+                .unwrap()
+                .child_id,
             blob.to_hex()
         );
 

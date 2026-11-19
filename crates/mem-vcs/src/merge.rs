@@ -108,7 +108,13 @@ pub fn merge_branches(
         }
     }
 
-    resolve_hierarchy_collisions(&mut merged, &ours_map, &theirs_map, strategy, &mut conflicts);
+    resolve_hierarchy_collisions(
+        &mut merged,
+        &ours_map,
+        &theirs_map,
+        strategy,
+        &mut conflicts,
+    );
 
     if !conflicts.is_empty() {
         conflicts.sort_by(|a, b| a.path.cmp(&b.path));
@@ -222,8 +228,8 @@ fn bfs_ancestors(conn: &Connection, start: CommitId) -> Result<HashMap<CommitId,
     queue.push_back((start, 0));
 
     while let Some((cid, dist)) = queue.pop_front() {
-        let info = get_commit_conn(conn, &cid)?
-            .ok_or_else(|| MemError::CommitNotFound(cid.to_hex()))?;
+        let info =
+            get_commit_conn(conn, &cid)?.ok_or_else(|| MemError::CommitNotFound(cid.to_hex()))?;
         for parent in info.parent_ids {
             if let Entry::Vacant(e) = dists.entry(parent) {
                 e.insert(dist + 1);

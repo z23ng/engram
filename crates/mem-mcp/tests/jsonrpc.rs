@@ -15,7 +15,10 @@ fn library_dispatches_tools_without_stdio() {
     vcs.init().unwrap();
     let engine = MemSearchEngine::new_bm25_only(vcs);
 
-    let list = call(&engine, json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
+    let list = call(
+        &engine,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    );
     assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
 
     let write = call(
@@ -30,7 +33,10 @@ fn library_dispatches_tools_without_stdio() {
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
             "name":"mem_read","arguments":{"path":"/semantic/a.md"}}}),
     );
-    assert!(read["result"]["content"][0]["text"].as_str().unwrap().contains("alpha"));
+    assert!(read["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("alpha"));
 
     let notify = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
     let llm = ConsolidateLlmConfig::disabled();

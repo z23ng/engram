@@ -23,11 +23,9 @@ pub fn run_stdio_server(
         }
     }
 
-    let store = SqliteStore::open(&db_path)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    let store = SqliteStore::open(&db_path).map_err(|e| io::Error::other(e.to_string()))?;
     let vcs = MemVcs::new(store);
-    vcs.init()
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    vcs.init().map_err(|e| io::Error::other(e.to_string()))?;
 
     let (engine, notice) = build_search_engine(vcs.clone(), &emb_cfg);
     if let Some(msg) = notice {
@@ -70,9 +68,7 @@ pub fn run_stdio_server(
 }
 
 fn write_json_line<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {
-    serde_json::to_writer(&mut *out, value)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    serde_json::to_writer(&mut *out, value).map_err(|e| io::Error::other(e.to_string()))?;
     out.write_all(b"\n")?;
     out.flush()
 }
-

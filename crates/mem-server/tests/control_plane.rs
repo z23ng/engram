@@ -31,7 +31,15 @@ fn open_reports_new_database_only_once() {
 fn invalid_project_slugs_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let (cp, _) = open(dir.path());
-    for bad in ["", "../etc", "a/b", "Upper", "-lead", "dot.name", &"x".repeat(64)] {
+    for bad in [
+        "",
+        "../etc",
+        "a/b",
+        "Upper",
+        "-lead",
+        "dot.name",
+        &"x".repeat(64),
+    ] {
         assert!(cp.create_project(bad).is_err(), "accepted {bad:?}");
     }
     cp.create_project("alpha-1").unwrap();
@@ -52,13 +60,26 @@ fn key_create_verify_revoke_round_trip() {
     let key = cp.verify(&plain).unwrap();
     assert_eq!((key.id, key.role), (info.id, Role::Bot));
     assert!(authorize(&key, "alpha", Action::Read).is_ok());
-    assert!(matches!(authorize(&key, "alpha", Action::Write), Err(ServerError::Forbidden(_))));
-    assert!(matches!(authorize(&key, "beta", Action::Read), Err(ServerError::Forbidden(_))));
+    assert!(matches!(
+        authorize(&key, "alpha", Action::Write),
+        Err(ServerError::Forbidden(_))
+    ));
+    assert!(matches!(
+        authorize(&key, "beta", Action::Read),
+        Err(ServerError::Forbidden(_))
+    ));
 
     assert!(cp.revoke_key(info.id).unwrap());
     assert!(matches!(cp.verify(&plain), Err(ServerError::Unauthorized)));
-    assert!(cp.list_keys().unwrap().iter().any(|k| k.id == info.id && k.revoked));
-    assert!(matches!(cp.verify("egm_unknown"), Err(ServerError::Unauthorized)));
+    assert!(cp
+        .list_keys()
+        .unwrap()
+        .iter()
+        .any(|k| k.id == info.id && k.revoked));
+    assert!(matches!(
+        cp.verify("egm_unknown"),
+        Err(ServerError::Unauthorized)
+    ));
 }
 
 #[test]

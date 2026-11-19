@@ -451,7 +451,10 @@ fn cmd_status(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
     while i < args.len() {
         if args[i] == "--branch" || args[i] == "-b" {
             i += 1;
-            branch = args.get(i).ok_or("--branch requires a branch name")?.clone();
+            branch = args
+                .get(i)
+                .ok_or("--branch requires a branch name")?
+                .clone();
         } else {
             return Err(format!("unexpected argument '{}' in status", args[i]));
         }
@@ -504,7 +507,11 @@ fn cmd_status(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
             paint(opts.use_color, "1", "AI Memory Status"),
             opts.db_path.display()
         );
-        println!("  Branch      : {} (HEAD {})", paint(opts.use_color, "36", &branch), &head.to_hex()[..12]);
+        println!(
+            "  Branch      : {} (HEAD {})",
+            paint(opts.use_color, "36", &branch),
+            &head.to_hex()[..12]
+        );
         println!("  Total Refs  : {}", refs.len());
         println!(
             "  Active Docs : {}  (/core: {}, /semantic: {}, /procedural: {}, /episodic: {})",
@@ -518,9 +525,17 @@ fn cmd_status(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
         println!(
             "  Providers   : embedding={:?} ({}), llm={:?} ({})",
             emb_cfg.backend,
-            if emb_cfg.model.is_empty() { "none" } else { &emb_cfg.model },
+            if emb_cfg.model.is_empty() {
+                "none"
+            } else {
+                &emb_cfg.model
+            },
             llm_cfg.backend,
-            if llm_cfg.model.is_empty() { "none" } else { &llm_cfg.model },
+            if llm_cfg.model.is_empty() {
+                "none"
+            } else {
+                &llm_cfg.model
+            },
         );
         if ws.is_empty() {
             println!("  Workspace   : clean (no uncommitted edits)");
@@ -550,7 +565,9 @@ fn cmd_write(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
             }
             "--tags" => {
                 i += 1;
-                let raw = args.get(i).ok_or("--tags requires a comma-separated list")?;
+                let raw = args
+                    .get(i)
+                    .ok_or("--tags requires a comma-separated list")?;
                 let list = raw
                     .split(',')
                     .map(|s| s.trim().trim_start_matches('#').to_string())
@@ -560,8 +577,12 @@ fn cmd_write(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
             }
             "--importance" => {
                 i += 1;
-                let raw = args.get(i).ok_or("--importance requires a float in [0,1]")?;
-                let val: f32 = raw.parse().map_err(|_| format!("invalid importance '{raw}'"))?;
+                let raw = args
+                    .get(i)
+                    .ok_or("--importance requires a float in [0,1]")?;
+                let val: f32 = raw
+                    .parse()
+                    .map_err(|_| format!("invalid importance '{raw}'"))?;
                 explicit_importance = Some(val.clamp(0.0, 1.0));
             }
             "--file" | "-f" => {
@@ -647,7 +668,11 @@ fn cmd_write(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
             vpath,
             branch,
             &blob_id.to_hex()[..12],
-            if newly_indexed { "indexed" } else { "deduplicated" }
+            if newly_indexed {
+                "indexed"
+            } else {
+                "deduplicated"
+            }
         );
     }
 
@@ -668,7 +693,11 @@ fn cmd_read(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode,
             }
             "--commit" | "-c" => {
                 i += 1;
-                commit_hex = Some(args.get(i).ok_or("--commit requires a commit hash")?.clone());
+                commit_hex = Some(
+                    args.get(i)
+                        .ok_or("--commit requires a commit hash")?
+                        .clone(),
+                );
             }
             other => {
                 if path_arg.is_none() {
@@ -681,7 +710,8 @@ fn cmd_read(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode,
         i += 1;
     }
 
-    let raw_path = path_arg.ok_or("usage: mem read <virtual_path> [--branch <b>] [--commit <cid>]")?;
+    let raw_path =
+        path_arg.ok_or("usage: mem read <virtual_path> [--branch <b>] [--commit <cid>]")?;
     let vpath = VirtualPath::new(raw_path).map_err(|e| e.to_string())?;
     let rev = match commit_hex {
         Some(c) => Revision::Commit(CommitId::from_hex(&c).map_err(|e| e.to_string())?),
@@ -795,7 +825,9 @@ fn cmd_commit(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
 
     let msg = message.ok_or("usage: mem commit -m <message> [--branch <b>] [--author <name>]")?;
     let (_, vcs) = open_existing_vcs(&opts.db_path)?;
-    let cid = vcs.commit(&branch, &author, &msg).map_err(|e| e.to_string())?;
+    let cid = vcs
+        .commit(&branch, &author, &msg)
+        .map_err(|e| e.to_string())?;
 
     if opts.json {
         println!(
@@ -869,7 +901,11 @@ fn cmd_branch(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
         match args[i].as_str() {
             "--from" => {
                 i += 1;
-                from_raw = Some(args.get(i).ok_or("--from requires a branch or commit")?.clone());
+                from_raw = Some(
+                    args.get(i)
+                        .ok_or("--from requires a branch or commit")?
+                        .clone(),
+                );
             }
             "-d" | "--delete" => {
                 i += 1;
@@ -950,7 +986,10 @@ fn cmd_rewind(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
     vcs.rewind(&branch, &cid).map_err(|e| e.to_string())?;
 
     if opts.json {
-        println!("{}", json!({ "branch": branch, "rewound_to": cid.to_hex() }));
+        println!(
+            "{}",
+            json!({ "branch": branch, "rewound_to": cid.to_hex() })
+        );
     } else {
         println!(
             "{} '{}' -> {}",
@@ -964,7 +1003,9 @@ fn cmd_rewind(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
 
 fn cmd_diff(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
     if args.len() != 2 {
-        return Err("usage: mem diff <base_branch_or_commit> <target_branch_or_commit>".to_string());
+        return Err(
+            "usage: mem diff <base_branch_or_commit> <target_branch_or_commit>".to_string(),
+        );
     }
     let base = parse_revision(&args[0]);
     let target = parse_revision(&args[1]);
@@ -1012,7 +1053,10 @@ fn cmd_merge(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
     }
 
     if positionals.len() != 2 {
-        return Err("usage: mem merge <source_branch> <target_branch> [--strategy auto|ours|theirs]".to_string());
+        return Err(
+            "usage: mem merge <source_branch> <target_branch> [--strategy auto|ours|theirs]"
+                .to_string(),
+        );
     }
 
     let (_, vcs) = open_existing_vcs(&opts.db_path)?;
@@ -1023,17 +1067,32 @@ fn cmd_merge(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
     match outcome {
         MergeOutcome::FastForward(cid) => {
             if opts.json {
-                println!("{}", json!({ "outcome": "fast_forward", "commit_id": cid.to_hex() }));
+                println!(
+                    "{}",
+                    json!({ "outcome": "fast_forward", "commit_id": cid.to_hex() })
+                );
             } else {
-                println!("Fast-forward merged into '{}' ({})", positionals[1], &cid.to_hex()[..12]);
+                println!(
+                    "Fast-forward merged into '{}' ({})",
+                    positionals[1],
+                    &cid.to_hex()[..12]
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
         MergeOutcome::Merged(cid) => {
             if opts.json {
-                println!("{}", json!({ "outcome": "merged", "commit_id": cid.to_hex() }));
+                println!(
+                    "{}",
+                    json!({ "outcome": "merged", "commit_id": cid.to_hex() })
+                );
             } else {
-                println!("Merged '{}' into '{}' ({})", positionals[0], positionals[1], &cid.to_hex()[..12]);
+                println!(
+                    "Merged '{}' into '{}' ({})",
+                    positionals[0],
+                    positionals[1],
+                    &cid.to_hex()[..12]
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -1098,7 +1157,9 @@ fn cmd_search(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
 
     let query = query_parts.join(" ");
     if query.trim().is_empty() {
-        return Err("usage: mem search <query> [--branch <b>] [--prefix <p>] [-k <top_k>]".to_string());
+        return Err(
+            "usage: mem search <query> [--branch <b>] [--prefix <p>] [-k <top_k>]".to_string(),
+        );
     }
 
     let (_, vcs) = open_existing_vcs(&opts.db_path)?;
@@ -1110,7 +1171,8 @@ fn cmd_search(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
         }
     }
 
-    let mut req = SearchRequest::new(Revision::BranchWorkspace(branch), query.clone()).with_top_k(top_k);
+    let mut req =
+        SearchRequest::new(Revision::BranchWorkspace(branch), query.clone()).with_top_k(top_k);
     if let Some(p) = prefix {
         req = req.with_prefix(p);
     }
@@ -1143,7 +1205,14 @@ fn cmd_search(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
                 "{}. {}  {}",
                 idx + 1,
                 paint(opts.use_color, "36;1", h.path.as_str()),
-                paint(opts.use_color, "90", &format!("(score={:.4}, lines {}-{})", h.score, h.start_line, h.end_line))
+                paint(
+                    opts.use_color,
+                    "90",
+                    &format!(
+                        "(score={:.4}, lines {}-{})",
+                        h.score, h.start_line, h.end_line
+                    )
+                )
             );
             println!("   Title   : {}  |  Section: {}", h.title, h.heading_path);
             let preview: String = h
@@ -1186,7 +1255,9 @@ fn cmd_compile(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCo
             "--max-tokens" => {
                 i += 1;
                 let raw = args.get(i).ok_or("--max-tokens requires an integer")?;
-                max_tokens = raw.parse().map_err(|_| format!("invalid max_tokens '{raw}'"))?;
+                max_tokens = raw
+                    .parse()
+                    .map_err(|_| format!("invalid max_tokens '{raw}'"))?;
             }
             other => return Err(format!("unexpected argument '{other}' in compile")),
         }
@@ -1195,8 +1266,8 @@ fn cmd_compile(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCo
 
     let (_, vcs) = open_existing_vcs(&opts.db_path)?;
     let t0 = Instant::now();
-    let compiled =
-        compile_core(&vcs, &Revision::BranchWorkspace(branch), max_tokens).map_err(|e| e.to_string())?;
+    let compiled = compile_core(&vcs, &Revision::BranchWorkspace(branch), max_tokens)
+        .map_err(|e| e.to_string())?;
     let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     if opts.json {
@@ -1272,8 +1343,7 @@ fn cmd_ingest(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
                     .get(i)
                     .ok_or("--tier requires core|episodic|semantic|procedural")?;
                 tier = Some(
-                    MemoryTier::from_segment(raw)
-                        .ok_or_else(|| format!("unknown tier '{raw}'"))?,
+                    MemoryTier::from_segment(raw).ok_or_else(|| format!("unknown tier '{raw}'"))?,
                 );
             }
             "--tag" => {
@@ -1296,7 +1366,9 @@ fn cmd_ingest(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
             }
             "--importance" => {
                 i += 1;
-                let raw = args.get(i).ok_or("--importance requires a float 0.0..1.0")?;
+                let raw = args
+                    .get(i)
+                    .ok_or("--importance requires a float 0.0..1.0")?;
                 importance = Some(
                     raw.parse::<f32>()
                         .map_err(|_| format!("invalid --importance '{raw}'"))?,
@@ -1481,8 +1553,8 @@ fn cmd_vault_import(opts: &GlobalOpts, args: &[String]) -> std::result::Result<E
                 let raw = args
                     .get(i)
                     .ok_or("--tier requires core|episodic|semantic|procedural")?;
-                tier = MemoryTier::from_segment(raw)
-                    .ok_or_else(|| format!("unknown tier '{raw}'"))?;
+                tier =
+                    MemoryTier::from_segment(raw).ok_or_else(|| format!("unknown tier '{raw}'"))?;
             }
             "--commit" => {
                 commit = true;
@@ -1516,7 +1588,8 @@ fn cmd_vault_import(opts: &GlobalOpts, args: &[String]) -> std::result::Result<E
         .import_vault(Path::new(&vault_dir), &branch, tier)
         .map_err(|e| e.to_string())?;
     let commit_id = if commit {
-        let msg = message.unwrap_or_else(|| format!("import vault '{vault_dir}' into /{}", tier.as_str()));
+        let msg = message
+            .unwrap_or_else(|| format!("import vault '{vault_dir}' into /{}", tier.as_str()));
         Some(
             engine
                 .vcs()
@@ -1802,13 +1875,25 @@ fn cmd_doctor(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
         println!("{}", paint(opts.use_color, "1", "AI Memory Doctor"));
         println!(
             "  [{}] Database      : {} ({})",
-            if sqlite_ok { paint(opts.use_color, "32", "PASS") } else { paint(opts.use_color, "31", "FAIL") },
+            if sqlite_ok {
+                paint(opts.use_color, "32", "PASS")
+            } else {
+                paint(opts.use_color, "31", "FAIL")
+            },
             opts.db_path.display(),
-            if db_exists { "initialized on disk" } else { "not yet initialized (verified schema in-memory)" }
+            if db_exists {
+                "initialized on disk"
+            } else {
+                "not yet initialized (verified schema in-memory)"
+            }
         );
         println!(
             "  [{}] FTS5 + Graph  : fts_chunks={}, blob_links={}",
-            if fts5_ok && links_ok { paint(opts.use_color, "32", "PASS") } else { paint(opts.use_color, "31", "FAIL") },
+            if fts5_ok && links_ok {
+                paint(opts.use_color, "32", "PASS")
+            } else {
+                paint(opts.use_color, "31", "FAIL")
+            },
             fts5_ok,
             links_ok
         );

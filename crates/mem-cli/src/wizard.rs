@@ -89,12 +89,8 @@ pub fn save_persistent_config(path: &Path, cfg: &PersistentCliConfig) -> Result<
 
     let body = serde_json::to_string_pretty(cfg)
         .map_err(|e| format!("failed to serialize config: {e}"))?;
-    fs::write(path, format!("{body}\n")).map_err(|e| {
-        format!(
-            "failed to write config file '{}': {e}",
-            path.display()
-        )
-    })?;
+    fs::write(path, format!("{body}\n"))
+        .map_err(|e| format!("failed to write config file '{}': {e}", path.display()))?;
 
     #[cfg(unix)]
     {
@@ -137,7 +133,9 @@ impl HostEnvironment {
             if home.join(".claude").exists() || home.join(".claude.json").exists() {
                 detected_clients.push("Claude Code");
             }
-            if claude_desktop_config_path(&home).is_some_and(|p| p.parent().is_some_and(|d| d.exists())) {
+            if claude_desktop_config_path(&home)
+                .is_some_and(|p| p.parent().is_some_and(|d| d.exists()))
+            {
                 detected_clients.push("Claude Desktop");
             }
             if home.join(".codeium/windsurf").exists() {
@@ -265,9 +263,8 @@ pub fn install_mcp_to_clients(
             "cursor" => targets.push(("Cursor", cursor_path, true)),
             "claude-code" | "claude" => targets.push(("Claude Code", claude_code_path, true)),
             "claude-desktop" => {
-                let cd = claude_desktop_config_path(&home).ok_or(
-                    "Claude Desktop config path is unsupported on this OS",
-                )?;
+                let cd = claude_desktop_config_path(&home)
+                    .ok_or("Claude Desktop config path is unsupported on this OS")?;
                 targets.push(("Claude Desktop", cd, true));
             }
             "windsurf" => targets.push(("Windsurf", windsurf_path, true)),
@@ -315,9 +312,8 @@ fn merge_mcp_json(
 
     let existed = path.exists();
     let mut root: Value = if existed {
-        let raw = fs::read_to_string(path).map_err(|e| {
-            format!("failed to read MCP config '{}': {e}", path.display())
-        })?;
+        let raw = fs::read_to_string(path)
+            .map_err(|e| format!("failed to read MCP config '{}': {e}", path.display()))?;
         if raw.trim().is_empty() {
             json!({})
         } else {
@@ -342,12 +338,9 @@ fn merge_mcp_json(
     let servers_val = obj
         .entry("mcpServers".to_string())
         .or_insert_with(|| Value::Object(Map::new()));
-    let servers_obj = servers_val.as_object_mut().ok_or_else(|| {
-        format!(
-            "'mcpServers' in '{}' must be a JSON object",
-            path.display()
-        )
-    })?;
+    let servers_obj = servers_val
+        .as_object_mut()
+        .ok_or_else(|| format!("'mcpServers' in '{}' must be a JSON object", path.display()))?;
 
     let status = if servers_obj.contains_key("ai-memory") {
         "updated"
@@ -379,7 +372,11 @@ pub fn cmd_mcp_install(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, S
                     .ok_or("--client requires all|cursor|claude-code|claude-desktop|windsurf")?
                     .clone();
             }
-            other => return Err(format!("unexpected argument '{other}' in 'mem mcp install'")),
+            other => {
+                return Err(format!(
+                    "unexpected argument '{other}' in 'mem mcp install'"
+                ))
+            }
         }
         i += 1;
     }
@@ -395,7 +392,11 @@ pub fn cmd_mcp_install(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, S
             paint(c, "1", "MCP Agent Auto-Wiring")
         );
         for (idx, r) in reports.iter().enumerate() {
-            let branch_sym = if idx + 1 == reports.len() { "└─" } else { "├─" };
+            let branch_sym = if idx + 1 == reports.len() {
+                "└─"
+            } else {
+                "├─"
+            };
             println!(
                 "│  {} {:<22} {} ({})",
                 paint(c, "90", branch_sym),
@@ -439,21 +440,49 @@ pub fn cmd_config(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, String
                 );
             } else {
                 let c = opts.use_color;
-                println!("{} {}", paint(c, "36;1", "◆"), paint(c, "1", "Active Engram Configuration"));
-                println!("│  Config File : {} ({})", opts.config_path.display(), if saved.is_some() { "persisted" } else { "using defaults" });
+                println!(
+                    "{} {}",
+                    paint(c, "36;1", "◆"),
+                    paint(c, "1", "Active Engram Configuration")
+                );
+                println!(
+                    "│  Config File : {} ({})",
+                    opts.config_path.display(),
+                    if saved.is_some() {
+                        "persisted"
+                    } else {
+                        "using defaults"
+                    }
+                );
                 println!("│  Vault DB    : {}", opts.db_path.display());
                 println!(
                     "│  Embedding   : {:?}  model={}  url={}  key={}",
                     emb_display.backend,
-                    if emb_display.model.is_empty() { "none" } else { &emb_display.model },
-                    if emb_display.base_url.is_empty() { "-" } else { &emb_display.base_url },
+                    if emb_display.model.is_empty() {
+                        "none"
+                    } else {
+                        &emb_display.model
+                    },
+                    if emb_display.base_url.is_empty() {
+                        "-"
+                    } else {
+                        &emb_display.base_url
+                    },
                     emb_display.api_key.as_deref().unwrap_or("none")
                 );
                 println!(
                     "└  Consolidate : {:?}  model={}  url={}",
                     llm_display.backend,
-                    if llm_display.model.is_empty() { "none" } else { &llm_display.model },
-                    if llm_display.base_url.is_empty() { "-" } else { &llm_display.base_url }
+                    if llm_display.model.is_empty() {
+                        "none"
+                    } else {
+                        &llm_display.model
+                    },
+                    if llm_display.base_url.is_empty() {
+                        "-"
+                    } else {
+                        &llm_display.base_url
+                    }
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -479,11 +508,13 @@ pub fn cmd_config(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, String
                     }
                     "--embed-model" => {
                         i += 1;
-                        embed_model = Some(args.get(i).ok_or("--embed-model requires a value")?.clone());
+                        embed_model =
+                            Some(args.get(i).ok_or("--embed-model requires a value")?.clone());
                     }
                     "--llm-model" => {
                         i += 1;
-                        llm_model = Some(args.get(i).ok_or("--llm-model requires a value")?.clone());
+                        llm_model =
+                            Some(args.get(i).ok_or("--llm-model requires a value")?.clone());
                     }
                     "--base-url" => {
                         i += 1;
@@ -497,7 +528,9 @@ pub fn cmd_config(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, String
                                 .map_err(|_| format!("invalid dimensions '{raw}'"))?,
                         );
                     }
-                    other => return Err(format!("unexpected option '{other}' in 'mem config use'")),
+                    other => {
+                        return Err(format!("unexpected option '{other}' in 'mem config use'"))
+                    }
                 }
                 i += 1;
             }
@@ -512,7 +545,11 @@ pub fn cmd_config(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, String
                 }
                 "openai" | "prod" | "production" => {
                     let key = api_key
-                        .or_else(|| env::var("OPENAI_API_KEY").ok().filter(|k| !k.trim().is_empty()))
+                        .or_else(|| {
+                            env::var("OPENAI_API_KEY")
+                                .ok()
+                                .filter(|k| !k.trim().is_empty())
+                        })
                         .or_else(|| cfg.mem.embedding.api_key.clone())
                         .unwrap_or_default();
                     cfg.mem.embedding = EmbeddingProviderConfig::openai_production(key.clone());
@@ -652,7 +689,11 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
         println!(
             "{}  {}",
             paint(c, "36;1", "│"),
-            paint(c, "90", "Git-like Versioned Memory + Obsidian Wiki Graph + MCP")
+            paint(
+                c,
+                "90",
+                "Git-like Versioned Memory + Obsidian Wiki Graph + MCP"
+            )
         );
         println!("{}", paint(c, "36;1", "│"));
 
@@ -676,7 +717,9 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
         println!(
             "{}  ├─ GPU      : {}",
             paint(c, "36;1", "│"),
-            host.gpu.as_deref().unwrap_or("None detected (CPU mode supported)")
+            host.gpu
+                .as_deref()
+                .unwrap_or("None detected (CPU mode supported)")
         );
         let ollama_label = if host.ollama_online {
             paint(c, "32", "online at 127.0.0.1:11434")
@@ -709,7 +752,11 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
                 "{}     [1] Local Ollama (Dev / Offline GPU)  {} {}",
                 paint(c, "36;1", "│"),
                 paint(c, "90", "bge-m3 + qwen2.5:7b"),
-                if rec_ollama { paint(c, "32", "(Recommended)") } else { String::new() }
+                if rec_ollama {
+                    paint(c, "32", "(Recommended)")
+                } else {
+                    String::new()
+                }
             );
             println!(
                 "{}     [2] Production OpenAI API            {}",
@@ -720,11 +767,22 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
                 "{}     [3] Lite Engine (Zero-Model CPU)     {} {}",
                 paint(c, "36;1", "│"),
                 paint(c, "90", "FTS5 BM25 + Obsidian [[Wikilink]] Graph"),
-                if !rec_ollama { paint(c, "32", "(Recommended)") } else { String::new() }
+                if !rec_ollama {
+                    paint(c, "32", "(Recommended)")
+                } else {
+                    String::new()
+                }
             );
             let default_choice = if rec_ollama { "1" } else { "3" };
-            let raw = prompt_line(&format!("{}  Select [1/2/3] (default {default_choice}): ", paint(c, "36;1", "│")))?;
-            match if raw.trim().is_empty() { default_choice } else { raw.trim() } {
+            let raw = prompt_line(&format!(
+                "{}  Select [1/2/3] (default {default_choice}): ",
+                paint(c, "36;1", "│")
+            ))?;
+            match if raw.trim().is_empty() {
+                default_choice
+            } else {
+                raw.trim()
+            } {
                 "1" | "ollama" => "ollama".to_string(),
                 "2" | "openai" => "openai".to_string(),
                 "3" | "lite" => "lite".to_string(),
@@ -741,7 +799,9 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
     };
 
     if selected_mode == "openai" && api_key.is_none() {
-        let env_key = env::var("OPENAI_API_KEY").ok().filter(|k| !k.trim().is_empty());
+        let env_key = env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty());
         if let Some(k) = env_key {
             api_key = Some(k);
         } else if interactive {
@@ -759,7 +819,9 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
         db_path: Some(opts.db_path.display().to_string()),
         mem: match selected_mode.as_str() {
             "ollama" | "local" => MemConfig::ollama_dev(),
-            "openai" | "prod" | "production" => MemConfig::openai_prod(api_key.clone().unwrap_or_default()),
+            "openai" | "prod" | "production" => {
+                MemConfig::openai_prod(api_key.clone().unwrap_or_default())
+            }
             "lite" | "disabled" | "none" => MemConfig {
                 search: SearchConfig::default(),
                 embedding: EmbeddingProviderConfig::disabled(),
@@ -872,7 +934,10 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
                 seeded_count
             );
         } else {
-            println!("{}  └─ Workspace: ready (clean repository)", paint(c, "36;1", "│"));
+            println!(
+                "{}  └─ Workspace: ready (clean repository)",
+                paint(c, "36;1", "│")
+            );
         }
         if let Some(msg) = &fallback_notice {
             println!("{}     {}", paint(c, "36;1", "│"), paint(c, "33", msg));
@@ -889,7 +954,11 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
             paint(c, "1", "MCP Agent Auto-Wiring")
         );
         for (idx, r) in mcp_reports.iter().enumerate() {
-            let sym = if idx + 1 == mcp_reports.len() { "└─" } else { "├─" };
+            let sym = if idx + 1 == mcp_reports.len() {
+                "└─"
+            } else {
+                "├─"
+            };
             println!(
                 "{}  {} {:<22} {} ({})",
                 paint(c, "36;1", "│"),
@@ -968,7 +1037,11 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
         println!(
             "{}  {}",
             paint(c, "32;1", "└"),
-            paint(c, "32;1", "Engram is ready! No env sourcing needed — config is auto-loaded.")
+            paint(
+                c,
+                "32;1",
+                "Engram is ready! No env sourcing needed — config is auto-loaded."
+            )
         );
 
         println!();

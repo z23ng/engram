@@ -168,15 +168,10 @@ fn parse_frontmatter(lines: &[&str]) -> (FrontmatterData, usize) {
         return (data, 0);
     }
 
-    let Some(end_idx) = lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(idx, line)| {
-            let t = line.trim();
-            (t == "---" || t == "...").then_some(idx)
-        })
-    else {
+    let Some(end_idx) = lines.iter().enumerate().skip(1).find_map(|(idx, line)| {
+        let t = line.trim();
+        (t == "---" || t == "...").then_some(idx)
+    }) else {
         return (data, 0);
     };
 
@@ -409,7 +404,10 @@ fn extract_wikilinks_from_line(line: &str) -> Vec<WikiLink> {
         };
         let inside = &after_open[..close_idx];
         let (target_part, alias_part) = match inside.split_once('|') {
-            Some((t, a)) => (t.trim(), Some(a.trim().to_string()).filter(|s| !s.is_empty())),
+            Some((t, a)) => (
+                t.trim(),
+                Some(a.trim().to_string()).filter(|s| !s.is_empty()),
+            ),
             None => (inside.trim(), None),
         };
         let clean_target = target_part

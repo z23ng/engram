@@ -125,7 +125,8 @@ impl EmbeddingProviderConfig {
                 cfg.api_key = Some(key);
             }
         }
-        if let Some(dim) = get("MEM_EMBEDDING_DIMENSIONS").and_then(|s| s.trim().parse::<usize>().ok())
+        if let Some(dim) =
+            get("MEM_EMBEDDING_DIMENSIONS").and_then(|s| s.trim().parse::<usize>().ok())
         {
             cfg.dimensions = Some(dim);
         }

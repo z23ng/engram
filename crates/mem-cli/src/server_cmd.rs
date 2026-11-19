@@ -47,9 +47,10 @@ pub fn cmd_serve(opts: &GlobalOpts, args: &[String]) -> CmdResult {
         return Err(format!("unexpected serve argument '{extra}'"));
     }
     let now = Utc::now().timestamp_millis();
-    let has_active_admin = cp.list_keys().map_err(|e| e.to_string())?.iter().any(|k| {
-        k.role == Role::Admin && !k.revoked && k.expires_at_ms.is_none_or(|t| t > now)
-    });
+    let has_active_admin =
+        cp.list_keys().map_err(|e| e.to_string())?.iter().any(|k| {
+            k.role == Role::Admin && !k.revoked && k.expires_at_ms.is_none_or(|t| t > now)
+        });
     if !has_active_admin {
         let (_, plain) = cp
             .create_key("admin", Role::Admin, None, None)
@@ -75,7 +76,10 @@ pub fn cmd_admin(args: &[String]) -> CmdResult {
             println!("created project {slug}");
         }
         ["project", "list"] => {
-            cp.list_projects().map_err(err)?.iter().for_each(|p| println!("{p}"));
+            cp.list_projects()
+                .map_err(err)?
+                .iter()
+                .for_each(|p| println!("{p}"));
         }
         ["key", "create"] => {
             let name = name.ok_or("--name is required")?;
@@ -92,7 +96,12 @@ pub fn cmd_admin(args: &[String]) -> CmdResult {
                 None => None,
             };
             let (key, plain) = cp.create_key(&name, role, scope, expires).map_err(err)?;
-            println!("created key id={} name={} role={}", key.id, key.name, role.as_str());
+            println!(
+                "created key id={} name={} role={}",
+                key.id,
+                key.name,
+                role.as_str()
+            );
             println!("key (shown once): {plain}");
         }
         ["key", "list"] => {
@@ -104,7 +113,14 @@ pub fn cmd_admin(args: &[String]) -> CmdResult {
                     _ => "active",
                 };
                 let scope = k.projects.map_or_else(|| "*".to_string(), |p| p.join(","));
-                println!("{}\t{}\t{}\t{}\t{}", k.id, k.name, k.role.as_str(), scope, status);
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    k.id,
+                    k.name,
+                    k.role.as_str(),
+                    scope,
+                    status
+                );
             }
         }
         ["key", "revoke", id] => {

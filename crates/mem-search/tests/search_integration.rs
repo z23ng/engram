@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 use mem_core::{
     MemoryMetadata, MemoryNode, MemoryTier, MergeStrategy, Result, Revision, VirtualPath,
 };
-use mem_store::SqliteStore;
-use mem_vcs::{MemVcs, VersionControlEngine};
 use mem_search::{
     compile_core, init_vault_template, ConsolidateLlmConfig, DeterministicHashEmbedder,
     EmbeddingProvider, EmbeddingProviderConfig, IngestRequest, IngestRole, MemConfig,
     MemSearchEngine, OpenAiCompatibleEmbedder, ProviderBackend, SearchConfig, SearchRequest,
 };
+use mem_store::SqliteStore;
+use mem_vcs::{MemVcs, VersionControlEngine};
 use tempfile::tempdir;
 
 fn vp(s: &str) -> VirtualPath {
@@ -92,7 +92,9 @@ fn branch_isolation_and_rewind_cleanup_in_hybrid_search() {
         ),
     )
     .unwrap();
-    let c1_main = vcs.commit("main", "main-agent", "commit base wiki").unwrap();
+    let c1_main = vcs
+        .commit("main", "main-agent", "commit base wiki")
+        .unwrap();
 
     // Branch B writes a secret note linking back to /semantic/base.md, plus an uncommitted draft.
     vcs.create_branch("branch-b", &Revision::BranchHead("main".into()))
@@ -256,8 +258,11 @@ fn deduplicated_indexing_across_50_branches() {
     vcs.commit("main", "init", "add 3 shared notes").unwrap();
 
     for b in 0..50 {
-        vcs.create_branch(&format!("exp/b{b:02}"), &Revision::BranchHead("main".into()))
-            .unwrap();
+        vcs.create_branch(
+            &format!("exp/b{b:02}"),
+            &Revision::BranchHead("main".into()),
+        )
+        .unwrap();
     }
 
     let spy = Arc::new(SpyEmbedder::new());
@@ -329,11 +334,19 @@ importance: 0.75
 核心并发参数规范见 [[SQLite 并发与锁配置]]。
 "#;
 
-    vcs.write("main", make_node("/semantic/sqlite-wal.md", note_a, 0.92, vec!["db/sqlite"]))
-        .unwrap();
     vcs.write(
         "main",
-        make_node("/procedural/sqlite-lock-sop.md", note_b, 0.85, vec!["ops/runbook"]),
+        make_node("/semantic/sqlite-wal.md", note_a, 0.92, vec!["db/sqlite"]),
+    )
+    .unwrap();
+    vcs.write(
+        "main",
+        make_node(
+            "/procedural/sqlite-lock-sop.md",
+            note_b,
+            0.85,
+            vec!["ops/runbook"],
+        ),
     )
     .unwrap();
     vcs.write(
@@ -440,13 +453,15 @@ fn ollama_and_openai_provider_config_switching_and_http_client() {
     env_map.insert("MEM_PROVIDER", "openai");
     env_map.insert("OPENAI_API_KEY", "sk-env-secret");
     env_map.insert("MEM_EMBEDDING_DIMENSIONS", "512");
-    let emb_env = EmbeddingProviderConfig::from_env_lookup(|k| env_map.get(k).map(|v| (*v).to_string()));
+    let emb_env =
+        EmbeddingProviderConfig::from_env_lookup(|k| env_map.get(k).map(|v| (*v).to_string()));
     assert_eq!(emb_env.backend, ProviderBackend::OpenAi);
     assert_eq!(emb_env.model, "text-embedding-3-small");
     assert_eq!(emb_env.api_key.as_deref(), Some("sk-env-secret"));
     assert_eq!(emb_env.dimensions, Some(512));
 
-    let llm_env = ConsolidateLlmConfig::from_env_lookup(|k| env_map.get(k).map(|v| (*v).to_string()));
+    let llm_env =
+        ConsolidateLlmConfig::from_env_lookup(|k| env_map.get(k).map(|v| (*v).to_string()));
     assert_eq!(llm_env.backend, ProviderBackend::OpenAi);
     assert_eq!(llm_env.model, "gpt-6-luna");
 
@@ -465,7 +480,11 @@ fn ollama_and_openai_provider_config_switching_and_http_client() {
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request_line = String::new();
             reader.read_line(&mut request_line).unwrap();
-            let req_path = request_line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let req_path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
             *path_clone.lock().unwrap() = Some(req_path);
 
             let mut content_len = 0usize;
@@ -592,12 +611,22 @@ fn core_compiler_budget_and_local_obsidian_vault_import() {
     // 1. Test /core hot compiler token budget & priority sorting + <5ms latency at 10k tree scale.
     vcs.write(
         "main",
-        make_node("/core/rules.md", "Never mutate production DB directly.", 1.0, vec!["rule"]),
+        make_node(
+            "/core/rules.md",
+            "Never mutate production DB directly.",
+            1.0,
+            vec!["rule"],
+        ),
     )
     .unwrap();
     vcs.write(
         "main",
-        make_node("/core/goal.md", "Ship Obsidian Wiki graph search.", 0.9, vec!["goal"]),
+        make_node(
+            "/core/goal.md",
+            "Ship Obsidian Wiki graph search.",
+            0.9,
+            vec!["goal"],
+        ),
     )
     .unwrap();
     let long_optional = "extra ".repeat(400);
@@ -615,7 +644,8 @@ fn core_compiler_budget_and_local_obsidian_vault_import() {
                 let bucket = i / 100;
                 let path = VirtualPath::new(format!("/semantic/b_{bucket:03}/n_{i:05}.md"))?;
                 let payload = format!("semantic note #{i}");
-                let blob_id = mem_store::cas::put_blob_conn(tx, payload.as_bytes(), "text/markdown")?;
+                let blob_id =
+                    mem_store::cas::put_blob_conn(tx, payload.as_bytes(), "text/markdown")?;
                 mem_store::workspace_upsert_conn(tx, "main", &path, &blob_id, &meta_json)?;
             }
             Ok(())
@@ -636,7 +666,9 @@ fn core_compiler_budget_and_local_obsidian_vault_import() {
         vec![vp("/core/rules.md"), vp("/core/goal.md")]
     );
     assert_eq!(compiled.skipped_paths, vec![vp("/core/optional_notes.md")]);
-    assert!(compiled.rendered.contains("Never mutate production DB directly."));
+    assert!(compiled
+        .rendered
+        .contains("Never mutate production DB directly."));
     assert!(compiled.estimated_tokens <= 120);
 
     // 2. Test local Obsidian Vault directory import (skipping .obsidian/).
@@ -645,11 +677,7 @@ fn core_compiler_budget_and_local_obsidian_vault_import() {
     fs::create_dir_all(vault_dir.join("notes")).unwrap();
     fs::create_dir_all(vault_dir.join("runbooks")).unwrap();
 
-    fs::write(
-        vault_dir.join(".obsidian/app.json"),
-        r#"{"ignored": true}"#,
-    )
-    .unwrap();
+    fs::write(vault_dir.join(".obsidian/app.json"), r#"{"ignored": true}"#).unwrap();
     fs::write(
         vault_dir.join("notes/adr-001.md"),
         "---\ntitle: ADR 001 Storage\naliases: [\"CAS Storage\"]\ntags: [adr]\nimportance: 0.95\n---\n# ADR 001\nUse BLAKE3 CAS and check [[fix-lock]].\n",
@@ -768,10 +796,7 @@ fn collaborative_pm_dev_bot_ingest_draft_merge_and_vault_roundtrip() {
     )
     .with_title("Checkout Retry Load Observation");
     let bot_out = engine.ingest(&bot_req, None).unwrap();
-    assert!(bot_out
-        .path
-        .as_str()
-        .starts_with("/episodic/bot-insights/"));
+    assert!(bot_out.path.as_str().starts_with("/episodic/bot-insights/"));
 
     // Export main snapshot back to local Obsidian directory layout.
     let export_dir = dir.path().join("exported_vault");
@@ -780,7 +805,9 @@ fn collaborative_pm_dev_bot_ingest_draft_merge_and_vault_roundtrip() {
         .unwrap();
     assert_eq!(export_stats.files_exported, 4);
     assert!(export_dir.join("core/system.md").exists());
-    assert!(export_dir.join("semantic/architecture/wal-mode.md").exists());
+    assert!(export_dir
+        .join("semantic/architecture/wal-mode.md")
+        .exists());
     assert!(export_dir
         .join("semantic/product/checkout-retry-policy.md")
         .exists());

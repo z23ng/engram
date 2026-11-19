@@ -9,9 +9,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::Utc;
-use mem_core::{
-    BlobId, CommitId, MemError, MemoryNode, MemoryTier, Result, Revision, VirtualPath,
-};
+use mem_core::{BlobId, CommitId, MemError, MemoryNode, MemoryTier, Result, Revision, VirtualPath};
 use mem_vcs::VersionControlEngine;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -283,8 +281,13 @@ pub fn ingest_knowledge(
         .unwrap_or_else(|| req.role.default_tier());
     let resolved_path = resolve_target_path(req, resolved_tier, &resolved_title)?;
 
-    let (linked_notes, matched_paths, weave_pairs) =
-        discover_related_notes(engine, &target_rev, &resolved_path, &resolved_title, raw_trimmed)?;
+    let (linked_notes, matched_paths, weave_pairs) = discover_related_notes(
+        engine,
+        &target_rev,
+        &resolved_path,
+        &resolved_title,
+        raw_trimmed,
+    )?;
 
     let resolved_tags = normalize_tags(req.role, resolved_tier, &req.tags);
     let resolved_importance = req
@@ -361,7 +364,11 @@ pub fn ingest_knowledge(
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("ingest({}): {}", req.role.as_str(), resolved_title));
-        Some(engine.vcs().commit(&target_branch, &resolved_author, &msg)?)
+        Some(
+            engine
+                .vcs()
+                .commit(&target_branch, &resolved_author, &msg)?,
+        )
     } else {
         None
     };
@@ -404,9 +411,10 @@ fn resolve_target_branch(engine: &MemSearchEngine, req: &IngestRequest) -> Resul
     match engine.vcs().head_commit(&draft_branch) {
         Ok(_) => Ok(draft_branch),
         Err(MemError::BranchNotFound(_)) => {
-            engine
-                .vcs()
-                .create_branch(&draft_branch, &Revision::BranchHead(base_branch.to_string()))?;
+            engine.vcs().create_branch(
+                &draft_branch,
+                &Revision::BranchHead(base_branch.to_string()),
+            )?;
             Ok(draft_branch)
         }
         Err(err) => Err(err),
@@ -479,7 +487,11 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     if count <= max_chars {
         return s.to_string();
     }
-    s.chars().take(max_chars).collect::<String>().trim_end().to_string()
+    s.chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 fn slugify_title(title: &str) -> String {
@@ -512,10 +524,7 @@ fn slugify_title(title: &str) -> String {
 fn normalize_tags(role: IngestRole, tier: MemoryTier, user_tags: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let defaults = [
-        format!("role/{}", role.as_str()),
-        tier.as_str().to_string(),
-    ];
+    let defaults = [format!("role/{}", role.as_str()), tier.as_str().to_string()];
     for tag in defaults.into_iter().chain(user_tags.iter().cloned()) {
         let clean = tag.trim().trim_start_matches('#').to_string();
         if !clean.is_empty() && seen.insert(clean.to_ascii_lowercase()) {
@@ -556,9 +565,7 @@ fn discover_related_notes(
 
     // 2. Direct title/alias matching against active branch notes (for natural inline weaving).
     for anchor in &active_anchors {
-        if &anchor.path == target_path
-            || anchor.title.eq_ignore_ascii_case(resolved_title)
-        {
+        if &anchor.path == target_path || anchor.title.eq_ignore_ascii_case(resolved_title) {
             continue;
         }
         let mut matched_anchor = false;
@@ -597,19 +604,13 @@ fn discover_related_notes(
     }
 
     // 3. Branch-scoped hybrid search to pick up conceptually related notes even without exact title match.
-    let query_seed = format!(
-        "{} {}",
-        resolved_title,
-        truncate_chars(raw_text, 240)
-    );
+    let query_seed = format!("{} {}", resolved_title, truncate_chars(raw_text, 240));
     if !active_anchors.is_empty() && linked_titles.len() < MAX_RELATED_LINKS {
         let mut req = SearchRequest::new(rev.clone(), query_seed).with_top_k(6);
         req.top_k = 6;
         if let Ok(hits) = engine.search(&req) {
             for hit in hits {
-                if &hit.path == target_path
-                    || hit.title.eq_ignore_ascii_case(resolved_title)
-                {
+                if &hit.path == target_path || hit.title.eq_ignore_ascii_case(resolved_title) {
                     continue;
                 }
                 let t_key = hit.title.to_ascii_lowercase();
@@ -700,11 +701,7 @@ fn contains_term_boundary(haystack_lower: &str, needle_lower: &str) -> bool {
         if !ascii_bounded || has_ascii_word_boundaries(haystack_lower, abs, end) {
             return true;
         }
-        start = abs + needle_lower
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .unwrap_or(1);
+        start = abs + needle_lower.chars().next().map(char::len_utf8).unwrap_or(1);
     }
     false
 }
@@ -789,11 +786,7 @@ fn replace_first_unprotected(line: &str, needle: &str, target_title: &str) -> Op
             result.push_str(&line[end..]);
             return Some(result);
         }
-        cursor = abs + needle_lower
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .unwrap_or(1);
+        cursor = abs + needle_lower.chars().next().map(char::len_utf8).unwrap_or(1);
     }
 
     None
@@ -935,7 +928,13 @@ fn try_format_with_llm(
 ) -> Option<String> {
     match cfg.backend {
         ProviderBackend::Disabled => return None,
-        ProviderBackend::OpenAi if cfg.api_key.as_deref().map(str::trim).unwrap_or("").is_empty() =>
+        ProviderBackend::OpenAi
+            if cfg
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty() =>
         {
             return None;
         }
@@ -1076,7 +1075,10 @@ mod tests {
         );
         assert_eq!(IngestRole::Pm.draft_branch(), "draft/pm-inbox");
 
-        assert_eq!(slugify_title("Checkout Rate Limit v2!"), "checkout-rate-limit-v2");
+        assert_eq!(
+            slugify_title("Checkout Rate Limit v2!"),
+            "checkout-rate-limit-v2"
+        );
         assert_eq!(slugify_title("支付超时 重试策略"), "支付超时-重试策略");
     }
 
@@ -1098,7 +1100,10 @@ mod tests {
         let existing_doc = "---\ntitle: \"SQLite WAL Mode\"\naliases: [\"WAL\"]\n---\n\n# SQLite WAL Mode\n\nConcurrent readers never block writers.\n";
         let blob = engine
             .vcs()
-            .write_node("main", MemoryNode::new(existing_path.clone(), existing_doc.as_bytes().to_vec()))
+            .write_node(
+                "main",
+                MemoryNode::new(existing_path.clone(), existing_doc.as_bytes().to_vec()),
+            )
             .unwrap();
         engine.index_blob_if_needed(&existing_path, &blob).unwrap();
         engine
@@ -1129,12 +1134,18 @@ mod tests {
         // Must NOT leak onto main before explicit merge
         assert!(engine
             .vcs()
-            .read(&Revision::BranchWorkspace("main".to_string()), &outcome.path)
+            .read(
+                &Revision::BranchWorkspace("main".to_string()),
+                &outcome.path
+            )
             .unwrap()
             .is_none());
         assert!(engine
             .vcs()
-            .read(&Revision::BranchWorkspace("draft/pm-inbox".to_string()), &outcome.path)
+            .read(
+                &Revision::BranchWorkspace("draft/pm-inbox".to_string()),
+                &outcome.path
+            )
             .unwrap()
             .is_some());
     }
@@ -1188,7 +1199,9 @@ mod tests {
 
         let outcome = ingest_knowledge(&engine, &req, Some(&llm_cfg)).unwrap();
         assert!(outcome.used_llm);
-        assert!(outcome.markdown.contains("Retry idempotent payments up to 3 times."));
+        assert!(outcome
+            .markdown
+            .contains("Retry idempotent payments up to 3 times."));
         assert!(outcome.markdown.contains("role: \"dev\""));
         server.join().unwrap();
     }

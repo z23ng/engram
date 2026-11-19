@@ -4,10 +4,7 @@ use mem_core::{
     CommitId, DiffKind, MemoryMetadata, MemoryNode, MemoryTier, MergeOutcome, MergeStrategy,
     Revision, VirtualPath,
 };
-use mem_search::{
-    ConsolidateLlmConfig, IngestRequest, IngestRole, MemSearchEngine,
-    SearchRequest,
-};
+use mem_search::{ConsolidateLlmConfig, IngestRequest, IngestRole, MemSearchEngine, SearchRequest};
 use mem_vcs::{MemVcs, VersionControlEngine};
 use serde_json::{json, Value};
 
@@ -68,7 +65,10 @@ pub fn handle_jsonrpc_request(
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(jsonrpc_error(resp_id, -32602, "missing tool 'name'"));
             };
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             match dispatch_tool(vcs, engine, llm_cfg, name, &args) {
                 Ok(text) => Some(json!({
                     "jsonrpc": "2.0",
@@ -114,10 +114,7 @@ fn dispatch_tool(
     name: &str,
     args: &Value,
 ) -> Result<String, String> {
-    let branch = args
-        .get("branch")
-        .and_then(Value::as_str)
-        .unwrap_or("main");
+    let branch = args.get("branch").and_then(Value::as_str).unwrap_or("main");
 
     match name {
         "mem_read" => {
@@ -160,7 +157,8 @@ fn dispatch_tool(
                     .map(String::from)
                     .collect();
             }
-            let node = MemoryNode::new(path.clone(), content.as_bytes().to_vec()).with_metadata(meta);
+            let node =
+                MemoryNode::new(path.clone(), content.as_bytes().to_vec()).with_metadata(meta);
             let blob_id = vcs.write_node(branch, node).map_err(|e| e.to_string())?;
             engine
                 .index_blob_if_needed(&path, &blob_id)
@@ -181,7 +179,10 @@ fn dispatch_tool(
                 .transpose()
                 .map_err(|e| e.to_string())?;
             let entries = vcs
-                .list(&Revision::BranchWorkspace(branch.to_string()), prefix.as_ref())
+                .list(
+                    &Revision::BranchWorkspace(branch.to_string()),
+                    prefix.as_ref(),
+                )
                 .map_err(|e| e.to_string())?;
             let list: Vec<Value> = entries
                 .into_iter()
@@ -530,6 +531,6 @@ fn mcp_tool_definitions() -> Vec<Value> {
                 },
                 "required": ["text"]
             }
-        })
+        }),
     ]
 }

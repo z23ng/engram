@@ -114,8 +114,7 @@ impl EmbeddingProvider for DeterministicHashEmbedder {
 }
 
 /// Custom HTTP POST transport callback `(url, bearer_api_key, json_body) -> response_json_body`.
-pub type HttpPostTransport =
-    Arc<dyn Fn(&str, Option<&str>, &str) -> Result<String> + Send + Sync>;
+pub type HttpPostTransport = Arc<dyn Fn(&str, Option<&str>, &str) -> Result<String> + Send + Sync>;
 
 /// OpenAI-compatible `/v1/embeddings` client supporting local Ollama and production OpenAI API.
 #[derive(Clone)]
@@ -146,10 +145,7 @@ impl OpenAiCompatibleEmbedder {
     }
 
     /// Creates an embedder with an explicit transport callback (useful for TLS clients or tests).
-    pub fn with_transport(
-        config: EmbeddingProviderConfig,
-        transport: HttpPostTransport,
-    ) -> Self {
+    pub fn with_transport(config: EmbeddingProviderConfig, transport: HttpPostTransport) -> Self {
         Self {
             config,
             timeout: Duration::from_secs(30),
@@ -227,9 +223,12 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
             None => http_post_json(&url, api_key, &body, self.timeout)?,
         };
 
-        let mut parsed: OpenAiEmbeddingsResponse = serde_json::from_str(&raw_response).map_err(|e| {
-            MemError::Serialization(format!("invalid OpenAI-compatible embedding response: {e}"))
-        })?;
+        let mut parsed: OpenAiEmbeddingsResponse =
+            serde_json::from_str(&raw_response).map_err(|e| {
+                MemError::Serialization(format!(
+                    "invalid OpenAI-compatible embedding response: {e}"
+                ))
+            })?;
         parsed.data.sort_by_key(|d| d.index);
 
         if parsed.data.len() != texts.len() {
@@ -240,9 +239,7 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
             )));
         }
 
-        Ok(Some(
-            parsed.data.into_iter().map(|d| d.embedding).collect(),
-        ))
+        Ok(Some(parsed.data.into_iter().map(|d| d.embedding).collect()))
     }
 }
 
@@ -282,7 +279,9 @@ fn http_post_json(
         .to_socket_addrs()
         .map_err(|e| MemError::Storage(format!("failed to resolve '{addr_target}': {e}")))?
         .next()
-        .ok_or_else(|| MemError::Storage(format!("no socket addresses resolved for '{addr_target}'")))?;
+        .ok_or_else(|| {
+            MemError::Storage(format!("no socket addresses resolved for '{addr_target}'"))
+        })?;
 
     let mut stream = TcpStream::connect_timeout(&sock_addr, timeout)
         .map_err(|e| MemError::Storage(format!("failed to connect to '{addr_target}': {e}")))?;
@@ -411,9 +410,9 @@ fn https_post_via_curl(
         })?;
     }
 
-    let output = child.wait_with_output().map_err(|e| {
-        MemError::Storage(format!("failed waiting for curl HTTPS response: {e}"))
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| MemError::Storage(format!("failed waiting for curl HTTPS response: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

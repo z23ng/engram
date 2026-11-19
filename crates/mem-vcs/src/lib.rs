@@ -224,8 +224,7 @@ impl MemVcs {
     /// Returns the current [`CommitId`] targeted by `branch`.
     pub fn head_commit(&self, branch: &str) -> Result<CommitId> {
         self.store.with_conn(|conn| {
-            get_ref_conn(conn, branch)?
-                .ok_or_else(|| MemError::BranchNotFound(branch.to_string()))
+            get_ref_conn(conn, branch)?.ok_or_else(|| MemError::BranchNotFound(branch.to_string()))
         })
     }
 }
@@ -343,8 +342,9 @@ impl VersionControlEngine for MemVcs {
             }
 
             let target_commit = match from_rev {
-                Revision::BranchWorkspace(src) | Revision::BranchHead(src) => get_ref_conn(tx, src)?
-                    .ok_or_else(|| MemError::BranchNotFound(src.clone()))?,
+                Revision::BranchWorkspace(src) | Revision::BranchHead(src) => {
+                    get_ref_conn(tx, src)?.ok_or_else(|| MemError::BranchNotFound(src.clone()))?
+                }
                 Revision::Commit(cid) => {
                     if get_commit_conn(tx, cid)?.is_none() {
                         return Err(MemError::CommitNotFound(cid.to_hex()));
@@ -372,7 +372,8 @@ impl VersionControlEngine for MemVcs {
     }
 
     fn diff(&self, base: &Revision, target: &Revision) -> Result<Vec<DiffEntry>> {
-        self.store.with_conn(|conn| compute_diff(conn, base, target))
+        self.store
+            .with_conn(|conn| compute_diff(conn, base, target))
     }
 
     fn merge(

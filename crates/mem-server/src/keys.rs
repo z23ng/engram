@@ -22,12 +22,21 @@ impl ControlPlane {
         let mut raw = [0u8; 32];
         getrandom::fill(&mut raw).map_err(|e| ServerError::Internal(format!("rng: {e}")))?;
         let plain = format!("egm_{}", base62(&raw));
-        let scope = projects.as_ref().map_or_else(|| "*".to_string(), |p| p.join(","));
+        let scope = projects
+            .as_ref()
+            .map_or_else(|| "*".to_string(), |p| p.join(","));
         let db = self.db()?;
         db.execute(
             "INSERT INTO api_keys (name, role, projects, key_hash, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![name, role.as_str(), scope, hash(&plain), now(), expires_at_ms],
+            params![
+                name,
+                role.as_str(),
+                scope,
+                hash(&plain),
+                now(),
+                expires_at_ms
+            ],
         )?;
         let key = ApiKey {
             id: db.last_insert_rowid(),
@@ -51,7 +60,10 @@ impl ControlPlane {
         if key.revoked || key.expires_at_ms.is_some_and(|t| t <= now()) {
             return Err(ServerError::Unauthorized);
         }
-        db.execute("UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2", params![now(), key.id])?;
+        db.execute(
+            "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
+            params![now(), key.id],
+        )?;
         Ok(key)
     }
 
