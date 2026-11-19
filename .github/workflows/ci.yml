@@ -35,3 +35,20 @@ jobs:
 
       - name: Run full workspace test suite
         run: cargo test --all-targets --locked
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain with rustfmt and clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy with warnings denied
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
