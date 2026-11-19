@@ -84,5 +84,5 @@
   - 实现异步整理接口：自动在独立 `consolidate/*` 分支扫描近期 `/episodic/` 轨迹日志，去重压缩并提炼 `/semantic/` 事实与 `/procedural/` SOP，通过后自动 Merge 回 `main`。
 
 ### 验收标准（Exit Criteria）
-1. Python Agent 脚本可通过 `import aimemory` 在 5 行代码内完成本地记忆库初始化、分支创建与上下文检索。
+1. Python Agent 脚本可通过 `import engram` 在 5 行代码内完成本地记忆库初始化、分支创建与上下文检索。
 2. 后台整理任务全程运行在隔离分支，即使整理过程中发生异常或结果不理想，也不会污染主干 `main` 记忆，可随时审查 `diff` 后合并或丢弃。
