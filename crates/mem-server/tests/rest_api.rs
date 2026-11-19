@@ -199,3 +199,233 @@ async fn audit_endpoint_needs_manage_on_the_project() {
     let (status, _) = call(&f, "GET", "/api/v1/projects/alpha/audit", Some(&dev), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+fn engine_vcs(f: &Fixture) -> mem_vcs::MemVcs {
+    f.cp.engine("alpha").unwrap().vcs().clone()
+}
+
+async fn rest_write(f: &Fixture, key: &str, path: &str, content: &str, message: Option<&str>) {
+    let mut body = json!({"path": path, "content": content});
+    if let Some(m) = message {
+        body["commit_message"] = json!(m);
+    }
+    let (status, resp) = call(
+        f,
+        "POST",
+        "/api/v1/projects/alpha/write",
+        Some(key),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+}
+
+#[tokio::test]
+async fn branches_tree_log_and_status_show_the_branch_view() {
+    use mem_core::Revision;
+    use mem_vcs::VersionControlEngine;
+    let f = fixture();
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    rest_write(&f, &dev, "/semantic/a.md", "a", Some("add a")).await;
+    engine_vcs(&f)
+        .create_branch("draft/x", &Revision::BranchHead("main".into()))
+        .unwrap();
+    rest_write(&f, &dev, "/core/b.md", "b", None).await;
+
+    let (_, b) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/branches",
+        Some(&dev),
+        None,
+    )
+    .await;
+    let branches = b["branches"].as_array().unwrap();
+    let names: Vec<&str> = branches
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["draft/x", "main"]);
+    assert_eq!(
+        (
+            branches[0]["changes"].as_u64(),
+            branches[1]["changes"].as_u64()
+        ),
+        (Some(0), Some(1))
+    );
+    assert_eq!(branches[1]["head"].as_str().unwrap().len(), 64);
+
+    let (_, tree) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/tree?branch=main",
+        Some(&dev),
+        None,
+    )
+    .await;
+    let paths: Vec<&str> = tree["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["/core/b.md", "/semantic/a.md"]);
+    assert_eq!(tree["files"][0]["content_type"], "text/markdown");
+    let (_, draft) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/tree?branch=draft%2Fx",
+        Some(&dev),
+        None,
+    )
+    .await;
+    assert_eq!(draft["files"].as_array().unwrap().len(), 1);
+
+    let (_, log) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/log?branch=main&limit=1",
+        Some(&dev),
+        None,
+    )
+    .await;
+    let commits = log["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(
+        (
+            commits[0]["message"].as_str(),
+            commits[0]["author"].as_str()
+        ),
+        (Some("add a"), Some("dev"))
+    );
+
+    let (_, st) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/status?branch=main",
+        Some(&dev),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        json!({"changes": [{"path": "/core/b.md", "op": "upsert"}]})
+    );
+}
+
+#[tokio::test]
+async fn diff_compares_heads_commits_and_workspace() {
+    let f = fixture();
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    rest_write(&f, &dev, "/semantic/a.md", "a", Some("add a")).await;
+    rest_write(&f, &dev, "/semantic/a.md", "a2", None).await;
+    let uri = "/api/v1/projects/alpha/diff?base=main&target=workspace:main";
+    let (status, d) = call(&f, "GET", uri, Some(&dev), None).await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    assert_eq!(d["entries"][0]["path"], "/semantic/a.md");
+    assert_eq!(d["entries"][0]["kind"], "modified");
+    let first = engine_vcs(&f)
+        .log("main", 10)
+        .unwrap()
+        .last()
+        .unwrap()
+        .commit_id
+        .to_hex();
+    let uri = format!("/api/v1/projects/alpha/diff?base={first}&target=main");
+    let (_, d) = call(&f, "GET", &uri, Some(&dev), None).await;
+    assert_eq!(d["entries"][0]["kind"], "added");
+}
+
+#[tokio::test]
+async fn search_uses_the_branch_workspace_only() {
+    use mem_core::Revision;
+    use mem_vcs::VersionControlEngine;
+    let f = fixture();
+    let bot = key(&f, "bot", Role::Bot, Some(&["alpha"]));
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    engine_vcs(&f)
+        .create_branch("other", &Revision::BranchHead("main".into()))
+        .unwrap();
+    rest_write(
+        &f,
+        &dev,
+        "/semantic/rust.md",
+        "# Rust\n\ntokio runtime notes",
+        None,
+    )
+    .await;
+    let (status, hits) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/search?q=tokio&branch=main",
+        Some(&bot),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hits}");
+    assert_eq!(hits["hits"][0]["path"], "/semantic/rust.md");
+    let (_, none) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/search?q=tokio&branch=other",
+        Some(&bot),
+        None,
+    )
+    .await;
+    assert_eq!(none["hits"], json!([]));
+}
+
+#[tokio::test]
+async fn raw_returns_bytes_with_stored_content_type() {
+    use mem_core::{MemoryNode, VirtualPath};
+    let f = fixture();
+    let bot = key(&f, "bot", Role::Bot, Some(&["alpha"]));
+    let png = vec![0x89, b'P', b'N', b'G', 0xff];
+    let mut node = MemoryNode::new(
+        VirtualPath::new("/semantic/_attachments/p.png").unwrap(),
+        png.clone(),
+    );
+    node.metadata.content_type = "image/png".into();
+    engine_vcs(&f).write_node("main", node).unwrap();
+    let req = Request::get("/api/v1/projects/alpha/raw?path=/semantic/_attachments/p.png")
+        .header("authorization", format!("Bearer {bot}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/png");
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+        png
+    );
+}
+
+#[tokio::test]
+async fn browse_endpoints_check_scope_and_branch() {
+    let f = fixture();
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    for uri in [
+        "/api/v1/projects/beta/tree",
+        "/api/v1/projects/beta/branches",
+        "/api/v1/projects/beta/log",
+    ] {
+        assert_eq!(
+            call(&f, "GET", uri, Some(&dev), None).await.0,
+            StatusCode::FORBIDDEN,
+            "{uri}"
+        );
+    }
+    let (status, _) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/log?branch=nope",
+        Some(&dev),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

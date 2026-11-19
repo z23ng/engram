@@ -24,6 +24,7 @@ pub fn router(cp: Shared) -> Router {
         .route("/p/{project}/dav/{branch}/", any(crate::dav::dav))
         .route("/p/{project}/dav/{branch}/{*rest}", any(crate::dav::dav))
         .merge(crate::api::routes())
+        .merge(crate::browse::routes())
         .with_state(cp)
 }
 
