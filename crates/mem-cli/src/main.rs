@@ -1,6 +1,7 @@
 //! Unified CLI, health diagnostics (`doctor`), and stdio MCP server (`mcp`) for AI Memory (`mem`).
 
 mod mcp;
+mod wizard;
 
 use std::collections::HashMap;
 use std::env;
@@ -26,32 +27,121 @@ use serde_json::json;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-struct GlobalOpts {
-    db_path: PathBuf,
-    provider_override: Option<String>,
-    json: bool,
-    use_color: bool,
+pub struct GlobalOpts {
+    pub db_path: PathBuf,
+    pub config_path: PathBuf,
+    pub persistent: Option<wizard::PersistentCliConfig>,
+    pub provider_override: Option<String>,
+    pub json: bool,
+    pub use_color: bool,
 }
 
 impl GlobalOpts {
-    fn embedding_config(&self) -> EmbeddingProviderConfig {
-        let mut overrides = HashMap::new();
-        if let Some(p) = &self.provider_override {
-            overrides.insert("MEM_PROVIDER".to_string(), p.clone());
+    pub fn embedding_config(&self) -> EmbeddingProviderConfig {
+        let mut cfg = self
+            .persistent
+            .as_ref()
+            .map(|p| p.mem.embedding.clone())
+            .unwrap_or_else(EmbeddingProviderConfig::ollama_default);
+
+        let backend_override = self
+            .provider_override
+            .as_deref()
+            .and_then(ProviderBackend::parse)
+            .or_else(|| {
+                env::var("MEM_PROVIDER")
+                    .ok()
+                    .and_then(|v| ProviderBackend::parse(&v))
+            });
+
+        if let Some(target_backend) = backend_override {
+            if target_backend != cfg.backend {
+                let prev_key = cfg.api_key.clone();
+                cfg = match target_backend {
+                    ProviderBackend::Disabled => EmbeddingProviderConfig::disabled(),
+                    ProviderBackend::Ollama => EmbeddingProviderConfig::ollama_default(),
+                    ProviderBackend::OpenAi => {
+                        let mut prod = EmbeddingProviderConfig::openai_production("");
+                        prod.api_key = prev_key.filter(|k| !k.trim().is_empty());
+                        prod
+                    }
+                };
+            }
         }
-        EmbeddingProviderConfig::from_env_lookup(|k| {
-            overrides.get(k).cloned().or_else(|| env::var(k).ok())
-        })
+
+        if let Ok(url) = env::var("MEM_EMBEDDING_BASE_URL") {
+            if !url.trim().is_empty() {
+                cfg.base_url = url;
+            }
+        }
+        if let Ok(model) = env::var("MEM_EMBEDDING_MODEL") {
+            if !model.trim().is_empty() {
+                cfg.model = model;
+            }
+        }
+        if let Ok(key) = env::var("OPENAI_API_KEY") {
+            if !key.trim().is_empty() && cfg.backend != ProviderBackend::Disabled {
+                cfg.api_key = Some(key);
+            }
+        }
+        if let Ok(dim) = env::var("MEM_EMBEDDING_DIMENSIONS") {
+            if let Ok(parsed) = dim.trim().parse::<usize>() {
+                cfg.dimensions = Some(parsed);
+            }
+        }
+
+        cfg
     }
 
-    fn consolidate_config(&self) -> ConsolidateLlmConfig {
-        let mut overrides = HashMap::new();
-        if let Some(p) = &self.provider_override {
-            overrides.insert("MEM_PROVIDER".to_string(), p.clone());
+    pub fn consolidate_config(&self) -> ConsolidateLlmConfig {
+        let mut cfg = self
+            .persistent
+            .as_ref()
+            .map(|p| p.mem.consolidate_llm.clone())
+            .unwrap_or_else(ConsolidateLlmConfig::ollama_default);
+
+        let backend_override = self
+            .provider_override
+            .as_deref()
+            .and_then(ProviderBackend::parse)
+            .or_else(|| {
+                env::var("MEM_PROVIDER")
+                    .ok()
+                    .and_then(|v| ProviderBackend::parse(&v))
+            });
+
+        if let Some(target_backend) = backend_override {
+            if target_backend != cfg.backend {
+                let prev_key = cfg.api_key.clone();
+                cfg = match target_backend {
+                    ProviderBackend::Disabled => ConsolidateLlmConfig::disabled(),
+                    ProviderBackend::Ollama => ConsolidateLlmConfig::ollama_default(),
+                    ProviderBackend::OpenAi => {
+                        let mut prod = ConsolidateLlmConfig::openai_production("");
+                        prod.api_key = prev_key.filter(|k| !k.trim().is_empty());
+                        prod
+                    }
+                };
+            }
         }
-        ConsolidateLlmConfig::from_env_lookup(|k| {
-            overrides.get(k).cloned().or_else(|| env::var(k).ok())
-        })
+
+        if let Ok(url) = env::var("MEM_LLM_BASE_URL") {
+            if !url.trim().is_empty() {
+                cfg.base_url = url;
+            }
+        }
+        if let Ok(model) = env::var("MEM_LLM_MODEL") {
+            if !model.trim().is_empty() {
+                cfg.model = model;
+            }
+        }
+        if let Ok(key) = env::var("OPENAI_API_KEY") {
+            if !key.trim().is_empty() && cfg.backend != ProviderBackend::Disabled {
+                cfg.api_key = Some(key);
+            }
+        }
+
+        cfg
     }
 }
 
@@ -90,6 +180,9 @@ fn run() -> std::result::Result<ExitCode, String> {
             println!("mem {VERSION}");
             Ok(ExitCode::SUCCESS)
         }
+        "onboard" | "setup" => wizard::cmd_onboard(&opts, args),
+        "config" => wizard::cmd_config(&opts, args),
+        "completions" => wizard::cmd_completions(args),
         "init" => cmd_init(&opts),
         "status" => cmd_status(&opts, args),
         "write" => cmd_write(&opts, args),
@@ -106,11 +199,17 @@ fn run() -> std::result::Result<ExitCode, String> {
         "vault" => cmd_vault(&opts, args),
         "gc" => cmd_gc(&opts),
         "doctor" => cmd_doctor(&opts),
-        "mcp" => {
-            let emb_cfg = opts.embedding_config();
-            mcp::run_stdio_server(opts.db_path.clone(), emb_cfg).map_err(|e| e.to_string())?;
-            Ok(ExitCode::SUCCESS)
-        }
+        "mcp" => match args.first().map(String::as_str) {
+            Some("install") => wizard::cmd_mcp_install(&opts, &args[1..]),
+            None | Some("serve") => {
+                let emb_cfg = opts.embedding_config();
+                mcp::run_stdio_server(opts.db_path.clone(), emb_cfg).map_err(|e| e.to_string())?;
+                Ok(ExitCode::SUCCESS)
+            }
+            Some(other) => Err(format!(
+                "unknown mcp subcommand '{other}'; expected 'serve' or 'install'"
+            )),
+        },
         other => Err(format!(
             "unknown subcommand '{other}'. Run 'mem --help' for usage."
         )),
@@ -118,12 +217,8 @@ fn run() -> std::result::Result<ExitCode, String> {
 }
 
 fn parse_global_opts(raw: &[String]) -> std::result::Result<(GlobalOpts, Vec<String>), String> {
-    let default_db = env::var("MEM_DB_PATH")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| ".ai-memory/memory.db".to_string());
-
-    let mut db_path = PathBuf::from(default_db);
+    let mut explicit_db: Option<PathBuf> = None;
+    let mut explicit_config: Option<PathBuf> = None;
     let mut provider_override: Option<String> = None;
     let mut json = false;
     let mut rest = Vec::new();
@@ -138,36 +233,26 @@ fn parse_global_opts(raw: &[String]) -> std::result::Result<(GlobalOpts, Vec<Str
         if arg == "-h" || arg == "--help" {
             if rest.is_empty() {
                 rest.push("help".to_string());
-                return Ok((
-                    GlobalOpts {
-                        db_path,
-                        provider_override,
-                        json,
-                        use_color: should_use_color(false),
-                    },
-                    rest,
-                ));
+                break;
             }
             rest.push(arg.clone());
         } else if arg == "-V" || arg == "--version" {
             rest.push("version".to_string());
-            return Ok((
-                GlobalOpts {
-                    db_path,
-                    provider_override,
-                    json,
-                    use_color: should_use_color(false),
-                },
-                rest,
-            ));
+            break;
         } else if arg == "--json" {
             json = true;
         } else if arg == "--db" {
             i += 1;
             let val = raw.get(i).ok_or("--db requires a path argument")?;
-            db_path = PathBuf::from(val);
+            explicit_db = Some(PathBuf::from(val));
         } else if let Some(val) = arg.strip_prefix("--db=") {
-            db_path = PathBuf::from(val);
+            explicit_db = Some(PathBuf::from(val));
+        } else if arg == "--config" {
+            i += 1;
+            let val = raw.get(i).ok_or("--config requires a path argument")?;
+            explicit_config = Some(PathBuf::from(val));
+        } else if let Some(val) = arg.strip_prefix("--config=") {
+            explicit_config = Some(PathBuf::from(val));
         } else if arg == "--provider" {
             i += 1;
             let val = raw
@@ -182,10 +267,31 @@ fn parse_global_opts(raw: &[String]) -> std::result::Result<(GlobalOpts, Vec<Str
         i += 1;
     }
 
+    let config_path = wizard::resolve_config_path(explicit_config.as_deref());
+    let persistent = wizard::load_persistent_config(&config_path);
+
+    let db_path = explicit_db
+        .or_else(|| {
+            env::var("MEM_DB_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            persistent
+                .as_ref()
+                .and_then(|p| p.db_path.as_ref())
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| wizard::mem_home_dir().join("memory.db"));
+
     let use_color = should_use_color(json);
     Ok((
         GlobalOpts {
             db_path,
+            config_path,
+            persistent,
             provider_override,
             json,
             use_color,
@@ -198,7 +304,7 @@ fn should_use_color(json: bool) -> bool {
     !json && env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal()
 }
 
-fn paint(enabled: bool, code: &str, text: &str) -> String {
+pub(crate) fn paint(enabled: bool, code: &str, text: &str) -> String {
     if enabled {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
@@ -260,7 +366,7 @@ pub(crate) fn build_search_engine(
     }
 }
 
-fn is_http_endpoint_reachable(base_url: &str, timeout: Duration) -> bool {
+pub(crate) fn is_http_endpoint_reachable(base_url: &str, timeout: Duration) -> bool {
     let without_scheme = base_url
         .trim()
         .strip_prefix("http://")
@@ -1330,19 +1436,27 @@ fn cmd_doctor(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
 
 fn print_help() {
     println!(
-        r#"mem {VERSION} — Versioned Structured Memory Engine for AI Agents
+        r#"mem {VERSION} — MemVaultTree: Versioned Structured Memory Engine for AI Agents
 
 USAGE:
   mem [GLOBAL OPTIONS] <COMMAND> [ARGS]
 
 GLOBAL OPTIONS:
-  --db <PATH>                 SQLite database path (default: $MEM_DB_PATH or ./.ai-memory/memory.db)
+  --db <PATH>                 SQLite database path (default: config.json or ~/.ai-memory/memory.db)
+  --config <PATH>             Config file path (default: $MEM_CONFIG_PATH or ~/.ai-memory/config.json)
   --provider <MODE>           Override provider: ollama | openai | disabled
   --json                      Output machine-readable JSON
   -h, --help                  Print help information
   -V, --version               Print version
 
-COMMANDS:
+ONBOARDING & CONFIG:
+  onboard | setup             Launch Clack-style setup wizard (hardware discovery + MCP wiring)
+  config show                 Show persisted config, active providers, and database path
+  config use <MODE>           Hot-switch provider: ollama | openai | lite
+  mcp install [--client C]    Auto-wire MCP server into Cursor, Claude Code, Claude Desktop, Windsurf
+  completions <SHELL>         Print shell tab completions (bash | zsh | fish)
+
+MEMORY & VCS COMMANDS:
   init                        Initialize a new single-file memory repository
   status                      Show branch, active tier counts, staged changes, and providers
   write <PATH> <CONTENT>      Write a memory node (use '-' for stdin or --file <LOCAL>)
@@ -1359,7 +1473,7 @@ COMMANDS:
   vault import <DIR>          Import a local Obsidian Vault (.md) directory
   gc                          Run mark-and-sweep garbage collection
   doctor                      Verify SQLite FTS5/Wiki Graph, provider connectivity, and latency
-  mcp                         Start stdio JSON-RPC 2.0 MCP Server for Coding Agents
+  mcp [serve]                 Start stdio JSON-RPC 2.0 MCP Server for Coding Agents
 "#
     );
 }

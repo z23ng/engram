@@ -202,3 +202,101 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
     let status = child.wait().unwrap();
     assert!(status.success());
 }
+
+#[test]
+fn cli_onboard_config_switch_and_mcp_auto_wiring() {
+    let dir = tempdir().unwrap();
+    let home_dir = dir.path().join("fake_home");
+    let mem_home = home_dir.join(".ai-memory");
+    let cursor_dir = home_dir.join(".cursor");
+    std::fs::create_dir_all(&cursor_dir).unwrap();
+
+    // Pre-populate an existing Cursor MCP config to verify non-destructive merge.
+    let cursor_mcp_path = cursor_dir.join("mcp.json");
+    std::fs::write(
+        &cursor_mcp_path,
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "other-tool": {
+                    "command": "npx",
+                    "args": ["other-server"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let run_isolated = |args: &[&str]| -> Value {
+        let out = Command::new(mem_bin())
+            .env("HOME", &home_dir)
+            .env("MEM_HOME", &mem_home)
+            .env_remove("MEM_DB_PATH")
+            .env_remove("MEM_PROVIDER")
+            .env_remove("MEM_CONFIG_PATH")
+            .env_remove("OPENAI_API_KEY")
+            .args(args)
+            .output()
+            .expect("spawn mem");
+        assert!(
+            out.status.success(),
+            "mem {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("valid json output")
+    };
+
+    // 1. Run `mem onboard --mode lite --seed-demo --yes --json`.
+    let onboard_res = run_isolated(&["onboard", "--mode", "lite", "--seed-demo", "--yes", "--json"]);
+    assert_eq!(onboard_res["mode"], "lite");
+    assert_eq!(onboard_res["seeded_notes"], 4);
+    assert!(mem_home.join("config.json").exists());
+    assert!(mem_home.join("memory.db").exists());
+
+    // 2. Verify Cursor MCP config kept "other-tool" and merged "ai-memory".
+    let cursor_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cursor_mcp_path).unwrap()).unwrap();
+    assert_eq!(cursor_json["mcpServers"]["other-tool"]["command"], "npx");
+    assert!(cursor_json["mcpServers"]["ai-memory"]["command"]
+        .as_str()
+        .is_some());
+
+    // 3. Search WITHOUT passing --db or --provider flags (uses config.json automatically!).
+    let hits = run_isolated(&["search", "BUSY_TIMEOUT", "--json"])
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(hits
+        .iter()
+        .any(|h| h["path"] == "/semantic/sqlite-wal.md"));
+    assert!(hits
+        .iter()
+        .any(|h| h["path"] == "/procedural/sqlite-lock-sop.md"));
+
+    // 4. Hot-switch to production OpenAI profile via `mem config use openai`.
+    let switch_prod = run_isolated(&[
+        "config",
+        "use",
+        "openai",
+        "--api-key",
+        "sk-prod-999",
+        "--json",
+    ]);
+    assert_eq!(switch_prod["active_mode"], "openai");
+
+    let shown_prod = run_isolated(&["config", "show", "--json"]);
+    assert_eq!(shown_prod["embedding"]["backend"], "openai");
+    assert_eq!(shown_prod["embedding"]["model"], "text-embedding-3-small");
+    assert_eq!(shown_prod["consolidate_llm"]["model"], "gpt-4o-mini");
+
+    // 5. Hot-switch back to local Ollama profile.
+    let switch_dev = run_isolated(&["config", "use", "ollama", "--json"]);
+    assert_eq!(switch_dev["active_mode"], "ollama");
+
+    let shown_dev = run_isolated(&["config", "show", "--json"]);
+    assert_eq!(shown_dev["embedding"]["backend"], "ollama");
+    assert_eq!(shown_dev["embedding"]["model"], "bge-m3");
+    assert_eq!(shown_dev["consolidate_llm"]["model"], "qwen2.5:7b");
+}
