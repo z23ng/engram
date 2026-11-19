@@ -5,6 +5,8 @@ members = [
     "crates/mem-store",
     "crates/mem-vcs",
     "crates/mem-search",
+    "crates/mem-mcp",
+    "crates/mem-server",
     "crates/mem-cli",
 ]
 
@@ -32,3 +34,9 @@ mem-core = { path = "crates/mem-core" }
 mem-store = { path = "crates/mem-store" }
 mem-vcs = { path = "crates/mem-vcs" }
 mem-search = { path = "crates/mem-search" }
+mem-mcp = { path = "crates/mem-mcp" }
+mem-server = { path = "crates/mem-server" }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net"] }
+axum = "0.8.9"
+getrandom = "0.4.3"
+tower = { version = "0.5.3", features = ["util"] }

@@ -1,6 +1,7 @@
 //! Unified CLI, health diagnostics (`doctor`), and stdio MCP server (`mcp`) for AI Memory (`mem`).
 
 mod mcp;
+mod server_cmd;
 mod wizard;
 
 use std::collections::HashMap;
@@ -201,6 +202,8 @@ fn run() -> std::result::Result<ExitCode, String> {
         "vault" => cmd_vault(&opts, args),
         "gc" => cmd_gc(&opts),
         "doctor" => cmd_doctor(&opts),
+        "serve" => server_cmd::cmd_serve(&opts, args),
+        "admin" => server_cmd::cmd_admin(args),
         "mcp" => match args.first().map(String::as_str) {
             Some("install") => wizard::cmd_mcp_install(&opts, &args[1..]),
             None | Some("serve") => {
@@ -1879,6 +1882,8 @@ MEMORY & VCS COMMANDS:
   gc                          Run mark-and-sweep garbage collection
   doctor                      Verify SQLite FTS5/Wiki Graph, provider connectivity, and latency
   mcp [serve]                 Start stdio JSON-RPC 2.0 MCP Server for Coding Agents
+  serve --data D [--listen A]  Start the multi-project HTTP server (prints admin key on first run)
+  admin --data D project|key   Manage server projects and API keys (admin, dev, pm, bot)
 "#
     );
 }
