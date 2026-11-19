@@ -55,14 +55,15 @@
 **阶段目标**：提供立即可用的 `mem` CLI 与 `mem-mcp` Server，支持多 Subagent 分支合并回主干，并接入真实 Coding Agent。
 
 ### 核心任务
-- [ ] **3.1 三路合并引擎（Three-Way Merge）**
+- [x] **3.1 三路合并引擎（Three-Way Merge）**
   - 实现 Commit DAG 最近公共祖先（LCA）查找算法。
   - 实现三棵树（`base` / `ours` / `theirs`）自动合并、`/episodic/` 追加合并与同路径冲突结构化报告。
-- [ ] **3.2 `mem-cli` 完整命令行工具**
-  - 交付完整类 Git 体验的 CLI（`init`, `status`, `write`, `read`, `ls`, `commit`, `log`, `branch`, `rewind`, `diff`, `merge`, `search`, `compile`, `gc`）。
-- [ ] **3.3 `mem-mcp` Server & `mem-daemon`**
-  - 实现标准 MCP Server（`stdio` 与 HTTP SSE），完整暴露读、写、搜、分支、回滚、合并工具。
-  - 提供 HTTP REST API 守护进程模式，支撑多进程并发读写 SQLite。
+- [x] **3.2 `mem-cli` 完整命令行工具**
+  - 交付完整类 Git 体验的 CLI（`onboard`, `config`, `init`, `status`, `write`, `read`, `ls`, `commit`, `log`, `branch`, `rewind`, `diff`, `merge`, `search`, `compile`, `ingest`, `vault`, `gc`, `doctor`, `completions`）。
+- [x] **3.3 内置 stdio MCP Server（11 个工具 + `mem mcp install`）**
+  - 实现标准 JSON-RPC 2.0 stdio MCP Server（暴露 `mem_read`、`mem_write`、`mem_ingest`、`mem_list`、`mem_search`、`mem_compile_core`、`mem_commit`、`mem_branch`、`mem_rewind`、`mem_diff`、`mem_merge`），并支持一键无损写入 Cursor / Claude Code / Claude Desktop / Windsurf。
+- [ ] **3.4 可选 `mem-daemon`（HTTP SSE / REST 多进程守护模式）**
+  - 提供独立 HTTP REST / SSE 守护进程，支撑多容器并发共享读写。
 
 ### 验收标准（Exit Criteria）
 1. 能够模拟两个并发 Subagent 在各自独立分支修改不同记忆路径后，无损三路合并回 `main`；修改同一路径时准确检出冲突并保留双侧版本供决策。

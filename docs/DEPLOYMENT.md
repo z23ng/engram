@@ -59,7 +59,31 @@ mem mcp install --client claude-code
 
 ---
 
-## 4. Docker 容器化部署（可选）
+## 4. 团队协同知识库工作流（PM + 开发 + Bot）
+
+当 **PM、开发与线上 Bot** 共用同一个记忆库时，推荐组合使用 **共享 Obsidian Vault（Git 托管）** 与 **分支隔离收件箱（`--draft`）**，确保持续产出高质量知识的同时严格保护 Bot 读取的 `main` 视图不被未审核内容污染：
+
+```bash
+# 1. 初始化团队四层协同 Obsidian 目录与角色模板（PM/Dev/Bot 各司其职）
+mem vault init-template ./team-vault
+
+# 2. 团队成员用 Obsidian 或 Git PR 编辑 semantic/product 与 semantic/architecture 后全量同步
+mem vault sync ./team-vault --branch main --commit
+
+# 3. 开发在 IDE 中可直接经 MCP mem_write / mem_ingest 边写代码边沉淀；
+#    PM / Bot 也可直接丢入自然语言口语草稿进隔离草稿箱（自动匹配主干生成 [[Wikilinks]]）：
+mem ingest --role pm --draft --title "Checkout Retry Rule" "All retries obey SQLite WAL busy_timeout."
+mem ingest --role bot --draft --llm "Load test retries succeeded on attempt 2."
+
+# 4. 审核差异后再合并回 main，Bot 在 main 上立即可搜，并可随时导出 Vault 快照查看图谱
+mem diff main draft/pm-inbox
+mem merge draft/pm-inbox main
+mem vault export ./team-vault --branch main
+```
+
+---
+
+## 5. Docker 容器化部署（可选）
 
 对于习惯容器化运维的服务器，可直接复用仓库内置的 [Dockerfile](../Dockerfile) 与 [docker-compose.yml](../docker-compose.yml)：
 
@@ -73,7 +97,7 @@ MEM_PROVIDER=ollama docker compose --profile ollama up --build
 
 ---
 
-## 5. 常用运维指令
+## 6. 常用运维指令
 
 ```bash
 # 全面健康体检（WAL、FTS5、blob_links 图谱表、模型连通性与 /core <5ms 校验）

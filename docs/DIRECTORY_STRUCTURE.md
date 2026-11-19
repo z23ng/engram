@@ -35,7 +35,7 @@ engram/
 │   ├── mem-core/               # 领域模型层：VirtualPath、MemoryNode、Tier、Commit、Branch、Diff、Error
 │   ├── mem-store/              # 存储底座：SQLite WAL、BLAKE3 CAS、zstd 压缩、FTS5/图谱 Schema
 │   ├── mem-vcs/                # 版本控制内核：Merkle Tree、Branch/Checkout、Commit、Diff、Rewind、3-Way Merge、GC
-│   ├── mem-search/             # 检索与编译层：Obsidian Wiki 解析、FTS5 BM25、Vector 索引、Graph-RRF、/core 热编译
+│   ├── mem-search/             # 检索与协同层：Obsidian Wiki 解析、混合检索、/core 热编译、ingest 自动织链与双向 Vault 桥接
 │   ├── mem-cli/                # 统一二进制 `mem`：CLI、Clack 风格 `onboard` 向导、`config`、`doctor` 与 `mcp` Server
 │   ├── mem-consolidate/        # (冷路径规划) 后台异步记忆提炼、冲突消解与衰减归档接口
 │   ├── mem-daemon/             # (规划) HTTP / gRPC 独立记忆服务端
@@ -108,34 +108,35 @@ pub trait VersionControlEngine: Send + Sync {
   - `embedder.rs`：`EmbeddingProvider` Trait、Level-1 `NoopEmbedder`、离线 `DeterministicHashEmbedder` 与支持 Ollama/OpenAI 的 `OpenAiCompatibleEmbedder`。
   - `hybrid.rs`：`MemSearchEngine`，维护挂载于不可变 `blob_id` 的 `chunk_index` / `fts_chunks` / `blob_links`，执行分支隔离的 BM25 + Vector + 1-Hop `[[Wikilink]]`（Outlinks/Backlinks/Entity）扩散与 Graph-RRF 重排。
   - `compiler.rs`：`compile_core` 读取 `/core/` 目录节点，按 `(importance DESC, path ASC)` 与 Token 预算在 `< 5ms` 内确定性编译上下文。
-  - `vault.rs`：`import_vault` 递归导入本地 Obsidian Markdown 知识库（自动跳过 `.obsidian/`）并构建版本化图谱索引。
+  - `ingest.rs`：`ingest_knowledge` 与 `IngestRole::{Pm, Dev, Bot}`，支持按角色分域路由、目标分支 `[[Wikilinks]]` 自动织链、`draft/{role}-inbox` 隔离入库，以及可选 OpenAI (`gpt-6-luna`) / Ollama (`qwen2.5:7b`) 润色（含确定性回退）。
+  - `vault.rs`：`init_vault_template`（四层协同模板初始化）、`sync_vault`（多层级目录增量同步）、`export_vault`（分支/Commit 快照导出至 Obsidian 目录）与 `import_vault`（单层级导入），自动跳过 `.obsidian/`、`.git/` 与 `_templates/`。
 
-### 2.5 `crates/mem-mcp`
-- **职责**：作为 MCP Server（`stdio` / Streamable HTTP）直接嵌入任意 AI Coding Agent 或个人助手。
-- **暴露的核心 MCP Tools**：
-  - `mem_read(path, branch?)` / `mem_list(prefix, branch?)`
+### 2.5 内置 MCP Server（`crates/mem-cli/src/mcp.rs`）
+- **职责**：作为内置 stdio JSON-RPC 2.0 MCP Server 直接嵌入任意 AI Coding Agent（Cursor / Claude Code / Claude Desktop / Windsurf），后续规划扩展独立 `mem-mcp` HTTP SSE 形态。
+- **暴露的 11 个核心 MCP Tools**：
+  - `mem_read(path, branch?, commit_id?)` / `mem_list(prefix?, branch?)`
   - `mem_write(path, content, tags?, importance?, branch?)`
+  - `mem_ingest(text, role?, draft?, title?, path?, tier?, tags?, use_llm?, branch?)`
   - `mem_search(query, prefix?, branch?, top_k?)`
   - `mem_compile_core(branch?, max_tokens?)`
-  - `mem_commit(message, branch?)`
+  - `mem_commit(message, branch?, author?)`
   - `mem_branch(name, from?)`
   - `mem_rewind(commit_id, branch?)`
   - `mem_diff(base, target)`
-  - `mem_merge(source, target)`
+  - `mem_merge(source, target, strategy?)`
 
 ### 2.6 `crates/mem-cli`
-- **职责**：提供类 Git 体验的命令行交互工具 `mem`。
+- **职责**：提供类 Git 体验的命令行交互工具 `mem`（含 `onboard`、`config`、`ingest`、`vault`、`doctor`、`completions` 与 `mcp`）。
 - **典型工作流示例**：
   ```bash
-  mem init ~/.ai-memory/project.db
-  mem write /core/rules.md "Never edit prod database directly"
-  mem commit -m "init project core rules"
-  mem branch subagent/refactor
-  mem write --branch subagent/refactor /semantic/findings.md "..."
-  mem search --branch subagent/refactor "database"
-  mem diff main subagent/refactor
-  mem merge subagent/refactor main
-  mem serve --mcp --db ~/.ai-memory/project.db
+  mem onboard --mode lite --seed-demo
+  mem vault init-template ./team-vault
+  mem vault sync ./team-vault --branch main --commit
+  mem ingest --role pm --draft --title "Checkout Retry" "All retries obey SQLite WAL busy_timeout."
+  mem diff main draft/pm-inbox
+  mem merge draft/pm-inbox main
+  mem vault export ./team-vault --branch main
+  mem mcp serve
   ```
 
 ### 2.7 `crates/mem-fuse`（Phase 4 可选模块）

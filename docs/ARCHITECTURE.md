@@ -36,6 +36,8 @@ flowchart TB
         FTS["SQLite FTS5 (BM25)"]
         VecIdx["Vector Index (sqlite-vec / HNSW)"]
         RRF["Branch-Scoped RRF Reranker"]
+        Ingest["Auto-Wiki Ingest Weaver (ingest.rs)"]
+        Vault["Obsidian Vault Bridge (vault.rs)"]
     end
 
     subgraph Storage["嵌入式存储底座 (mem-store - SQLite WAL)"]
@@ -95,6 +97,16 @@ flowchart TB
 | `/procedural/` | 程序性技能记忆 | 面向任务类型索引，支持置信度评分与命中次数衰减 | Debug 经验、特定代码库操作 SOP、工具调用避坑指南 |
 
 每个节点自动携带版本控制元数据：`path`、`blob_hash`、`content_type`、`importance_score`、`tags`、`created_at`、`updated_at`、`source_commit`。
+
+### 2.1 多角色分域协作规范（PM / 开发 / Bot）
+
+当 **PM（知识供给与业务口径）**、**开发（技术架构与规范）** 与 **Bot（会话读写与运行观测）** 共享同一版本库时，`ingest.rs` 与 `init_vault_template` 按贡献者角色自动分域路由并支持草稿分支隔离：
+
+| 角色 (`role`) | 默认层级 | 默认 VFS 目录前缀 | 默认 `importance` | `--draft` 隔离收件箱分支 | 典型写入内容 |
+| :--- | :--- | :--- | :---: | :--- | :--- |
+| **`pm`** | `/semantic/` | `/semantic/product/` *(Procedural: `/procedural/product-playbooks/`)* | `0.75` | `draft/pm-inbox` | PRD、用户故事、业务约束、验收标准、FAQ |
+| **`dev`** | `/semantic/` | `/semantic/architecture/` *(Procedural: `/procedural/runbooks/`)* | `0.85` | `draft/dev-inbox` | ADR、接口与存储不变量、排障手册、复盘结论 |
+| **`bot`** | `/episodic/` | `/episodic/bot-insights/` *(Semantic: `/semantic/bot-notes/`)* | `0.55` | `draft/bot-inbox` | 会话洞察、边缘案例观测、待审核候选规则 |
 
 ---
 
@@ -267,7 +279,8 @@ flowchart LR
 ```
 
 - **热路径（`/core/` Compiler）**：读取当前 Branch `/core/` 下全部节点，按 `(importance DESC, path ASC)` 与 `max_tokens` 预算确定性拼接为 `<core_memory>` 上下文块，耗时 **< 5ms**，全程零 LLM 调用。
-- **本地 Obsidian 知识库导入（`vault.rs`）**：`import_vault` 自动跳过 `.obsidian/` 等隐藏目录，将本地 `.md` 知识库批量导入目标分支并构建双链图谱与混合索引。
+- **双向 Obsidian 协同桥接（`vault.rs`）**：提供 `init_vault_template`（四层协同骨架与角色模板）、`sync_vault`（按 `/core` / `/semantic` / `/procedural` / `/episodic` 映射全量增量同步）、`export_vault`（将任意分支或历史 Commit 导出为本地 Obsidian 目录）与 `import_vault`（单层导入），并统一跳过 `.obsidian/`、`.git/` 与 `_templates/`。
+- **智能草稿织链入库（`ingest.rs`）**：允许 PM / Dev / Bot 通过 `mem ingest` / MCP `mem_ingest` 直接提交非结构化自然语言草稿，自动扫描**目标分支当前活跃视图**中的 `chunk_index` 标题/别名与混合检索命中项，行内及文末自动编织 `[[Wikilinks]]`；配合 `--draft` 强制落入 `draft/{role}-inbox` 隔离审查。`--llm`（OpenAI `gpt-6-luna` / Ollama `qwen2.5:7b`）仅在用户显式请求润色时触发且具备确定性本地回退，热路径 `read` / `write` / `search` / `compile_core` 始终保持 100% 零 LLM 调用。
 
 ---
 

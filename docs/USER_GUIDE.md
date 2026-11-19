@@ -100,6 +100,16 @@ importance: 0.92
 2. **标题面包屑注入（Breadcrumb Chunking）**：切分切片时自动把 `[Title | Aliases | Tags | Section: # 存储引擎 > ## WAL 并发配置]` 拼接到切片头部，消除长文档切块导致的语义丢失。
 3. **`[[Wikilink]]` 1-Hop 图谱扩散（支持路径、文件名、标题、别名解析）**：当 `/semantic/sqlite-wal.md` 被命中时，它链接的 `/procedural/sqlite-lock-sop.md`（出链）以及引用了它的 `architecture-moc.md`（入链/反向链接）即使正文里没有 `"BUSY_TIMEOUT"` 关键词，也会被自动召回并标明 `Outlinks` / `Backlinks`。
 
+### 2.3 多角色协同目录归属（PM / 开发 / Bot）
+
+使用 `mem ingest` 或 `mem vault init-template` 时，不同协作角色的记忆默认分域如下（也可通过 `--path` / `--tier` 显式覆盖）：
+
+| 角色 (`--role`) | 默认层级 | 默认 VFS 路径前缀 | 默认 `importance` | 默认标签 | `--draft` 隔离分支 |
+| :--- | :--- | :--- | :---: | :--- | :--- |
+| **`pm`** | `/semantic/` | `/semantic/product/` | `0.75` | `role/pm`, `semantic` | `draft/pm-inbox` |
+| **`dev`** | `/semantic/` | `/semantic/architecture/` *(Procedural: `/procedural/runbooks/`)* | `0.85` | `role/dev`, `semantic` | `draft/dev-inbox` |
+| **`bot`** | `/episodic/` | `/episodic/bot-insights/` *(Semantic: `/semantic/bot-notes/`)* | `0.55` | `role/bot`, `episodic` | `draft/bot-inbox` |
+
 ---
 
 ## 第 3 章：CLI 全命令参考手册
@@ -302,8 +312,12 @@ mem mcp install --client claude-code
 1. **Q：本地没有安装或启动 Ollama，`mem` 还能用吗？**
    **A**：可以。当探测到 Ollama 离线时，`mem` 会自动平滑降级为 **Level-1 模式（SQLite 多列加权 FTS5 BM25 + Obsidian 双链 1-Hop 图谱扩散）**，所有版本控制、导入、检索与 MCP 工具均可正常工作。
 2. **Q：切换模型（例如从 `ollama` 切到 `openai`）会导致已有记忆库丢失吗？**
-   **A**：不会。`~/.ai-memory/config.json` 仅控制推理端点与模型名称，`~/.ai-memory/memory.db` 中的所有文档、Merkle 树和历史 Commit 100% 保留。注意：若切换不同维度的 Embedding 模型（如从 `1024` 维的 `bge-m3` 切到 `1536` 维的 `text-embedding-3-small`），`cosine_similarity` 会忽略维度不匹配的旧向量并依靠 FTS5 + 双链正常工作，如需让旧文档使用新模型向量，可在新库重新 `vault import`。
+   **A**：不会。`~/.ai-memory/config.json` 仅控制推理端点与模型名称，`~/.ai-memory/memory.db` 中的所有文档、Merkle 树和历史 Commit 100% 保留。注意：若切换不同维度的 Embedding 模型（如从 `1024` 维的 `bge-m3` 切到 `1536` 维的 `text-embedding-3-small`），`cosine_similarity` 会忽略维度不匹配的旧向量并依靠 FTS5 + 双链正常工作，如需让旧文档使用新模型向量，可在新库重新 `vault sync` 或 `vault import`。
 3. **Q：生产环境连接 `https://api.openai.com/v1` 需要什么条件？**
    **A**：系统需安装 `curl`（Linux / macOS 默认自带，Docker 镜像已内置），并通过 `mem config use openai --api-key "sk-..."` 或环境变量 `OPENAI_API_KEY` 配置有效密钥。
 4. **Q：如何备份或迁移整个记忆库？**
    **A**：Engram 采用单文件嵌入式架构，只需复制 `~/.ai-memory/memory.db`（建议先停止写入或用 SQLite `.backup` 命令）和 `~/.ai-memory/config.json` 即可完整迁移所有历史版本与图谱索引。
+5. **Q：PM 或 Bot 用 `mem ingest --draft` 写入后，线上 Bot 为什么一时搜不到？**
+   **A**：这是有意为之的安全隔离：`--draft` 会自动派生并写入 `draft/pm-inbox` 或 `draft/bot-inbox` 隔离分支，防止未审核草稿直接污染 `main`。执行 `mem diff main draft/pm-inbox` 检查无误并 `mem merge draft/pm-inbox main` 合入后，`main` 分支即可立即检索。
+6. **Q：执行 `mem ingest --llm` 时如果 Ollama 没启动或未配置 `OPENAI_API_KEY` 会报错吗？**
+   **A**：不会报错。当 LLM 端点不可达、服务禁用或缺少 API Key 时，`ingest` 会自动回退为本地确定性 Obsidian Markdown 模板 + `[[Wikilink]]` 自动织链完成写入与提交。
