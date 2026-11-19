@@ -141,7 +141,7 @@ pub struct ConsolidateLlmConfig {
     pub backend: ProviderBackend,
     /// OpenAI-compatible base URL.
     pub base_url: String,
-    /// Chat completion model (`qwen2.5:7b` for Ollama, `gpt-4o-mini` for OpenAI).
+    /// Chat completion model (`qwen2.5:7b` for Ollama, `gpt-6-luna` for OpenAI).
     pub model: String,
     /// Optional Bearer API key.
     pub api_key: Option<String>,
@@ -164,12 +164,12 @@ impl ConsolidateLlmConfig {
         }
     }
 
-    /// Production configuration targeting OpenAI `gpt-4o-mini`.
+    /// Production configuration targeting OpenAI `gpt-6-luna`.
     pub fn openai_production(api_key: impl Into<String>) -> Self {
         Self {
             backend: ProviderBackend::OpenAi,
             base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o-mini".to_string(),
+            model: "gpt-6-luna".to_string(),
             api_key: Some(api_key.into()),
         }
     }
@@ -289,7 +289,7 @@ impl MemConfig {
         }
     }
 
-    /// Returns the production preset using OpenAI (`text-embedding-3-small` + `gpt-4o-mini`).
+    /// Returns the production preset using OpenAI (`text-embedding-3-small` + `gpt-6-luna`).
     pub fn openai_prod(api_key: impl Into<String>) -> Self {
         let key = api_key.into();
         Self {

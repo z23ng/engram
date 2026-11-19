@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh -
 | 模式标识 | Embedding 向量化 | 后台记忆提炼 LLM | 适用场景 |
 | :--- | :--- | :--- | :--- |
 | **`ollama`**（开发默认） | 本地 Ollama `bge-m3` (`1024` 维) | 本地 Ollama `qwen2.5:7b` | 有本地显卡/Apple Silicon，完全离线免费运行；若服务未启动会自动平滑降级到 `lite` |
-| **`openai`**（生产推荐） | OpenAI `text-embedding-3-small` (`1536` 维) | OpenAI `gpt-4o-mini` | 生产服务器、零本地显存占用、按量超低成本计费 |
+| **`openai`**（生产推荐） | OpenAI `text-embedding-3-small` (`1536` 维) | OpenAI `gpt-6-luna` | 生产服务器、零本地显存占用、按量超低成本计费 |
 | **`lite`**（零模型极速） | 无（纯 CPU） | 无 | 轻量服务器、CI 测试或仅使用多列加权 FTS5 + Obsidian `[[双链]]` 1-Hop 图谱检索 |
 
 ---

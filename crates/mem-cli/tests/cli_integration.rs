@@ -289,7 +289,7 @@ fn cli_onboard_config_switch_and_mcp_auto_wiring() {
     let shown_prod = run_isolated(&["config", "show", "--json"]);
     assert_eq!(shown_prod["embedding"]["backend"], "openai");
     assert_eq!(shown_prod["embedding"]["model"], "text-embedding-3-small");
-    assert_eq!(shown_prod["consolidate_llm"]["model"], "gpt-4o-mini");
+    assert_eq!(shown_prod["consolidate_llm"]["model"], "gpt-6-luna");
 
     // 5. Hot-switch back to local Ollama profile.
     let switch_dev = run_isolated(&["config", "use", "ollama", "--json"]);

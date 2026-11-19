@@ -29,7 +29,7 @@ make demo                 # Lite 模式 + 写入 Obsidian Wiki 示例并验证
 | 运行档案 | Embedding 模型 | 后台整理 LLM | 硬件要求 |
 | :--- | :--- | :--- | :--- |
 | **`ollama`**（本地开发默认） | Ollama `bge-m3` (`1024` 维) | Ollama `qwen2.5:7b` | 建议 8GB+ GPU；若服务未启动会自动平滑降级为 `lite` |
-| **`openai`**（生产推荐） | OpenAI `text-embedding-3-small` (`1536` 维) | OpenAI `gpt-4o-mini` | 任意 CPU + 系统 `curl` + `OPENAI_API_KEY` |
+| **`openai`**（生产推荐） | OpenAI `text-embedding-3-small` (`1536` 维) | OpenAI `gpt-6-luna` | 任意 CPU + 系统 `curl` + `OPENAI_API_KEY` |
 | **`lite`**（极简零模型） | 无 | 无 | 任意双核 CPU + 128MB 内存（FTS5 + Obsidian 双链图谱） |
 
 ### 一行命令从本地 Ollama 切到生产 OpenAI（无需迁移数据库）

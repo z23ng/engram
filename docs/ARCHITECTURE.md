@@ -279,7 +279,7 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | **Level 1：纯本地零模型降级** | `ProviderBackend::Disabled` (`NoopEmbedder`) | `ProviderBackend::Disabled` | 零外部进程与显卡要求，靠多列加权 FTS5 + Obsidian `[[双链]]` 1-Hop 图谱即可精准召回 |
 | **开发 / 离线本地部署 (Ollama)** | `backend = "ollama"`<br>`base_url = "http://127.0.0.1:11434/v1"`<br>`model = "bge-m3"` (`dimensions = 1024`) | `backend = "ollama"`<br>`base_url = "http://127.0.0.1:11434/v1"`<br>`model = "qwen2.5:7b"` | 本地 RTX GPU / Apple Silicon 离线免费运行，默认开发环境预设（`MemConfig::ollama_dev()`） |
-| **生产环境部署 (OpenAI API)** | `backend = "openai"`<br>`base_url = "https://api.openai.com/v1"`<br>`model = "text-embedding-3-small"` (`dimensions = 1536`) | `backend = "openai"`<br>`base_url = "https://api.openai.com/v1"`<br>`model = "gpt-4o-mini"` | 生产环境零本地显存占用，仅需切换配置或设置环境变量（`MemConfig::openai_prod(key)`） |
+| **生产环境部署 (OpenAI API)** | `backend = "openai"`<br>`base_url = "https://api.openai.com/v1"`<br>`model = "text-embedding-3-small"` (`dimensions = 1536`) | `backend = "openai"`<br>`base_url = "https://api.openai.com/v1"`<br>`model = "gpt-6-luna"` | 生产环境零本地显存占用，仅需切换配置或设置环境变量（`MemConfig::openai_prod(key)`） |
 
 环境变量无缝切换方式：
 - 本地开发（默认）：`MEM_PROVIDER=ollama`

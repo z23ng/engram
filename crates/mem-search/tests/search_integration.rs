@@ -427,7 +427,7 @@ fn ollama_and_openai_provider_config_switching_and_http_client() {
     assert_eq!(prod_cfg.embedding.base_url, "https://api.openai.com/v1");
     assert_eq!(prod_cfg.embedding.model, "text-embedding-3-small");
     assert_eq!(prod_cfg.embedding.api_key.as_deref(), Some("sk-prod-key"));
-    assert_eq!(prod_cfg.consolidate_llm.model, "gpt-4o-mini");
+    assert_eq!(prod_cfg.consolidate_llm.model, "gpt-6-luna");
 
     let serialized = serde_json::to_string(&prod_cfg).unwrap();
     let roundtrip: MemConfig = serde_json::from_str(&serialized).unwrap();
@@ -446,7 +446,7 @@ fn ollama_and_openai_provider_config_switching_and_http_client() {
 
     let llm_env = ConsolidateLlmConfig::from_env_lookup(|k| env_map.get(k).map(|v| (*v).to_string()));
     assert_eq!(llm_env.backend, ProviderBackend::OpenAi);
-    assert_eq!(llm_env.model, "gpt-4o-mini");
+    assert_eq!(llm_env.model, "gpt-6-luna");
 
     // 3. Real local TCP loopback HTTP server testing OpenAiCompatibleEmbedder end-to-end.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

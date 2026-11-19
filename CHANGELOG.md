@@ -13,7 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **`mem-search`**:
   - Obsidian Wiki parser (`wiki.rs`) supporting YAML Frontmatter (`title`, `aliases`, `tags`, `entities`, `importance`), `[[Wikilinks]]`, inline `#tags`, and heading-breadcrumb chunking.
   - Branch-isolated 4-way Graph-RRF hybrid search (`hybrid.rs`) with multi-column weighted FTS5 BM25 (including CJK bigram support), zero-allocation little-endian cosine vector scoring, and 1-hop `[[Wikilink]]` outlink/backlink/entity graph expansion.
-  - Pluggable OpenAI-compatible embedding provider (`embedder.rs` & `config.rs`) supporting local Ollama (`bge-m3` / `qwen2.5:7b`), production OpenAI (`text-embedding-3-small` / `gpt-4o-mini`), and Level-1 zero-model fallback (`NoopEmbedder`).
+  - Pluggable OpenAI-compatible embedding provider (`embedder.rs` & `config.rs`) supporting local Ollama (`bge-m3` / `qwen2.5:7b`), production OpenAI (`text-embedding-3-small` / `gpt-6-luna`), and Level-1 zero-model fallback (`NoopEmbedder`).
   - `<5ms` deterministic `/core` hot compiler (`compiler.rs`) and local Obsidian Vault importer (`vault.rs`).
 - **`mem-cli`**:
   - Unified `mem` binary with Git-like VCS/search commands, `mem doctor` diagnostics, and stdio JSON-RPC 2.0 MCP server (`mem mcp`) exposing 10 tools.

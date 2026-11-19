@@ -714,7 +714,7 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
             println!(
                 "{}     [2] Production OpenAI API            {}",
                 paint(c, "36;1", "│"),
-                paint(c, "90", "text-embedding-3-small + gpt-4o-mini")
+                paint(c, "90", "text-embedding-3-small + gpt-6-luna")
             );
             println!(
                 "{}     [3] Lite Engine (Zero-Model CPU)     {} {}",
