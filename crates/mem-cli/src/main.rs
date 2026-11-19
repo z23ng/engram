@@ -1882,7 +1882,7 @@ MEMORY & VCS COMMANDS:
   gc                          Run mark-and-sweep garbage collection
   doctor                      Verify SQLite FTS5/Wiki Graph, provider connectivity, and latency
   mcp [serve]                 Start stdio JSON-RPC 2.0 MCP Server for Coding Agents
-  serve --data D [--listen A]  Start the multi-project HTTP server (prints admin key on first run)
+  serve --data D [--listen A]  Start the multi-project HTTP server (prints an admin key if none is active)
   admin --data D project|key   Manage server projects and API keys (admin, dev, pm, bot)
 "#
     );

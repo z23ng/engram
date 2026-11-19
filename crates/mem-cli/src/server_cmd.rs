@@ -42,11 +42,15 @@ pub fn cmd_serve(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     let listen = take_flag(&mut args, "--listen")?.unwrap_or_else(|| "127.0.0.1:7878".into());
     let emb_cfg = opts.embedding_config();
     let factory: EngineFactory = Box::new(move |vcs: MemVcs| build_search_engine(vcs, &emb_cfg).0);
-    let (cp, created) = open_control(&mut args, factory)?;
+    let (cp, _) = open_control(&mut args, factory)?;
     if let Some(extra) = args.first() {
         return Err(format!("unexpected serve argument '{extra}'"));
     }
-    if created {
+    let now = Utc::now().timestamp_millis();
+    let has_active_admin = cp.list_keys().map_err(|e| e.to_string())?.iter().any(|k| {
+        k.role == Role::Admin && !k.revoked && k.expires_at_ms.is_none_or(|t| t > now)
+    });
+    if !has_active_admin {
         let (_, plain) = cp
             .create_key("admin", Role::Admin, None, None)
             .map_err(|e| e.to_string())?;

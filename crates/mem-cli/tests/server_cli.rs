@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 fn mem(args: &[&str]) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_mem")).args(args).output().unwrap();
@@ -42,10 +42,8 @@ fn http_status(addr: &str, key: &str) -> String {
     resp.lines().next().unwrap_or_default().to_string()
 }
 
-#[test]
-fn serve_prints_one_time_admin_key_and_enforces_auth() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().to_str().unwrap();
+/// Starts `mem serve` and returns the child, the printed admin key (if any), and the address.
+fn start_serve(data: &str) -> (Child, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mem"))
         .args(["--provider", "disabled", "serve", "--data", data, "--listen", "127.0.0.1:0"])
         .stdout(Stdio::piped())
@@ -63,6 +61,14 @@ fn serve_prints_one_time_admin_key_and_enforces_auth() {
             addr = a.trim().to_string();
         }
     }
+    (child, key, addr)
+}
+
+#[test]
+fn serve_prints_one_time_admin_key_and_enforces_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    let (mut child, key, addr) = start_serve(data);
     assert!(!key.is_empty(), "no admin key printed");
     assert!(http_status(&addr, "egm_wrong").contains("401"));
     assert!(http_status(&addr, &key).contains("404"), "admin key on missing project");
@@ -71,4 +77,20 @@ fn serve_prints_one_time_admin_key_and_enforces_auth() {
 
     let second = mem(&["admin", "key", "list", "--data", data]).1;
     assert!(second.contains("admin") && !second.contains("egm_"), "{second}");
+}
+
+#[test]
+fn serve_bootstraps_admin_key_when_admin_cli_created_the_database_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let (mut child, key, _) = start_serve(data);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(!key.is_empty(), "no admin key printed when no active admin key exists");
+
+    let (mut child, key, _) = start_serve(data);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(key.is_empty(), "second start must not print another admin key");
 }
