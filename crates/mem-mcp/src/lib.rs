@@ -381,7 +381,8 @@ fn parse_revision(raw: &str) -> Revision {
     }
 }
 
-fn mcp_tool_definitions() -> Vec<Value> {
+/// JSON definitions of all MCP tools, as returned by `tools/list`.
+pub fn mcp_tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "mem_read",

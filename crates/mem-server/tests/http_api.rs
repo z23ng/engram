@@ -114,6 +114,12 @@ async fn dev_write_then_read_returns_content_without_cross_project_leak() {
     let (status, written) = send(&f.app, Some(&k), WRITE, Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{written}");
     assert!(written["commit_id"].is_string());
+    let audit = f.cp.list_audit("alpha", 10).unwrap();
+    assert_eq!(audit[0].operation, "rest.write");
+    assert_eq!(
+        audit[0].commit_id.as_ref(),
+        written["commit_id"].as_str().map(String::from).as_ref()
+    );
 
     let (status, read) = send(&f.app, Some(&k), READ, None).await;
     assert_eq!(

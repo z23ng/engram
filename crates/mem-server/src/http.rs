@@ -14,11 +14,12 @@ use crate::{authorize, Action, ApiKey, ControlPlane, ServerError};
 
 type Shared = Arc<ControlPlane>;
 
-/// REST routes under `/api/v1`.
+/// REST routes under `/api/v1` and the MCP endpoint `/p/{project}/mcp`.
 pub fn router(cp: Shared) -> Router {
     Router::new()
         .route("/api/v1/projects/{project}/read", get(read))
         .route("/api/v1/projects/{project}/write", post(write))
+        .route("/p/{project}/mcp", post(crate::mcp::mcp))
         .with_state(cp)
 }
 
@@ -42,7 +43,7 @@ async fn read(
     headers: HeaderMap,
     Query(q): Query<ReadParams>,
 ) -> Result<Json<Value>, ServerError> {
-    guarded(cp, headers, project, Action::Read, move |_, engine| {
+    guarded(cp, headers, project, Action::Read, move |_, _, engine| {
         let path = VirtualPath::new(&q.path)?;
         let rev = Revision::BranchWorkspace(q.branch.unwrap_or_else(|| "main".into()));
         let node = engine
@@ -65,7 +66,8 @@ async fn write(
     headers: HeaderMap,
     Json(body): Json<WriteBody>,
 ) -> Result<Json<Value>, ServerError> {
-    guarded(cp, headers, project, Action::Write, move |key, engine| {
+    let scope = project.clone();
+    guarded(cp, headers, scope, Action::Write, move |cp, key, engine| {
         let path = VirtualPath::new(&body.path)?;
         let branch = body.branch.unwrap_or_else(|| "main".into());
         let node = MemoryNode::new(path.clone(), body.content.into_bytes());
@@ -75,6 +77,7 @@ async fn write(
             Some(msg) => Some(engine.vcs().commit(&branch, &key.name, &msg)?.to_hex()),
             None => None,
         };
+        cp.record_audit(key, &project, "rest.write", commit_id.as_deref())?;
         Ok(Json(json!({
             "path": path.as_str(),
             "branch": branch,
@@ -86,7 +89,7 @@ async fn write(
 }
 
 /// Verifies the bearer key, authorizes `action` on `project`, then runs `f` off the async runtime.
-async fn guarded<T, F>(
+pub(crate) async fn guarded<T, F>(
     cp: Shared,
     headers: HeaderMap,
     project: String,
@@ -95,7 +98,7 @@ async fn guarded<T, F>(
 ) -> Result<T, ServerError>
 where
     T: Send + 'static,
-    F: FnOnce(&ApiKey, MemSearchEngine) -> Result<T, ServerError> + Send + 'static,
+    F: FnOnce(&ControlPlane, &ApiKey, MemSearchEngine) -> Result<T, ServerError> + Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
         let token = headers
@@ -105,7 +108,7 @@ where
             .ok_or(ServerError::Unauthorized)?;
         let key = cp.verify(token.trim())?;
         authorize(&key, &project, action)?;
-        f(&key, cp.engine(&project)?)
+        f(&cp, &key, cp.engine(&project)?)
     })
     .await
     .map_err(|e| ServerError::Internal(format!("blocking task failed: {e}")))?

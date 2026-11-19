@@ -1,13 +1,16 @@
 //! Multi-project Engram server: control plane (`server.db`), API key RBAC, and HTTP endpoints.
 
+mod audit;
 mod auth;
 mod control;
 mod error;
 mod http;
 mod keys;
+mod mcp;
 
 use std::sync::Arc;
 
+pub use audit::AuditEntry;
 pub use auth::{authorize, Action, ApiKey, Role};
 pub use control::{ControlPlane, EngineFactory};
 pub use error::ServerError;

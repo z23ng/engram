@@ -16,6 +16,7 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 getrandom = { workspace = true }
 mem-core = { workspace = true }
+mem-mcp = { workspace = true }
 mem-search = { workspace = true }
 mem-store = { workspace = true }
 mem-vcs = { workspace = true }

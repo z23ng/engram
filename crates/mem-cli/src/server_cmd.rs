@@ -14,7 +14,8 @@ use crate::{build_search_engine, GlobalOpts};
 type CmdResult = Result<ExitCode, String>;
 
 const ADMIN_USAGE: &str = "usage: mem admin --data <dir> (project create <slug> | project list | \
-key create --name <n> --role admin|dev|pm|bot [--projects a,b] [--expires-days N] | key list | key revoke <id>)";
+key create --name <n> --role admin|dev|pm|bot [--projects a,b] [--expires-days N] | key list | key revoke <id> | \
+audit --project <slug> [--limit N])";
 
 /// Removes `flag value` from `args` and returns the value.
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, String> {
@@ -43,6 +44,7 @@ pub fn cmd_serve(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     let emb_cfg = opts.embedding_config();
     let factory: EngineFactory = Box::new(move |vcs: MemVcs| build_search_engine(vcs, &emb_cfg).0);
     let (cp, _) = open_control(&mut args, factory)?;
+    let cp = cp.with_llm_config(opts.consolidate_config());
     if let Some(extra) = args.first() {
         return Err(format!("unexpected serve argument '{extra}'"));
     }
@@ -68,6 +70,8 @@ pub fn cmd_admin(args: &[String]) -> CmdResult {
     let role = take_flag(&mut args, "--role")?;
     let projects = take_flag(&mut args, "--projects")?;
     let expires_days = take_flag(&mut args, "--expires-days")?;
+    let project = take_flag(&mut args, "--project")?;
+    let limit = take_flag(&mut args, "--limit")?;
     let err = |e: mem_server::ServerError| e.to_string();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -129,6 +133,22 @@ pub fn cmd_admin(args: &[String]) -> CmdResult {
                 return Err(format!("key {id} does not exist or is already revoked"));
             }
             println!("revoked key {id}");
+        }
+        ["audit"] => {
+            let project = project.ok_or("--project is required")?;
+            let limit = match limit {
+                Some(raw) => raw
+                    .parse()
+                    .map_err(|_| "--limit must be a positive integer")?,
+                None => 50,
+            };
+            for a in cp.list_audit(&project, limit).map_err(err)? {
+                let commit = a.commit_id.unwrap_or_else(|| "-".into());
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    a.at_ms, a.key_name, a.role, a.project, a.operation, commit
+                );
+            }
         }
         _ => return Err(ADMIN_USAGE.to_string()),
     }

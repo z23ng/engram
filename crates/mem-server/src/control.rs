@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::Utc;
-use mem_search::MemSearchEngine;
+use mem_search::{ConsolidateLlmConfig, MemSearchEngine};
 use mem_store::SqliteStore;
 use mem_vcs::{MemVcs, VersionControlEngine};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -30,6 +30,7 @@ pub struct ControlPlane {
     conn: Mutex<Connection>,
     engines: Mutex<HashMap<String, MemSearchEngine>>,
     make_engine: EngineFactory,
+    llm_cfg: ConsolidateLlmConfig,
 }
 
 impl ControlPlane {
@@ -48,8 +49,19 @@ impl ControlPlane {
             conn: Mutex::new(conn),
             engines: Mutex::new(HashMap::new()),
             make_engine,
+            llm_cfg: ConsolidateLlmConfig::disabled(),
         };
         Ok((cp, created))
+    }
+
+    /// Sets the LLM used by `mem_ingest` when a caller passes `use_llm` (default: disabled).
+    pub fn with_llm_config(mut self, cfg: ConsolidateLlmConfig) -> Self {
+        self.llm_cfg = cfg;
+        self
+    }
+
+    pub(crate) fn llm_config(&self) -> &ConsolidateLlmConfig {
+        &self.llm_cfg
     }
 
     pub(crate) fn db(&self) -> Result<MutexGuard<'_, Connection>, ServerError> {

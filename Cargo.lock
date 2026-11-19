@@ -507,6 +507,7 @@ dependencies = [
  "chrono",
  "getrandom",
  "mem-core",
+ "mem-mcp",
  "mem-search",
  "mem-store",
  "mem-vcs",

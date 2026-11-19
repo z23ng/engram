@@ -136,3 +136,23 @@ fn serve_bootstraps_admin_key_when_admin_cli_created_the_database_first() {
         "second start must not print another admin key"
     );
 }
+
+#[test]
+fn admin_audit_lists_rows_of_a_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let (ok, out) = mem(&["admin", "audit", "--project", "alpha", "--data", data]);
+    assert!(ok, "{out}");
+    let bad_limit = [
+        "admin",
+        "audit",
+        "--project",
+        "alpha",
+        "--limit",
+        "x",
+        "--data",
+        data,
+    ];
+    assert!(!mem(&bad_limit).0);
+}
