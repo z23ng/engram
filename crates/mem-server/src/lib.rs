@@ -1,5 +1,6 @@
 //! Multi-project Engram server: control plane (`server.db`), API key RBAC, and HTTP endpoints.
 
+mod api;
 mod audit;
 mod auth;
 mod control;

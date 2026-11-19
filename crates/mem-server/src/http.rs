@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use crate::{authorize, Action, ApiKey, ControlPlane, ServerError};
 
-type Shared = Arc<ControlPlane>;
+pub(crate) type Shared = Arc<ControlPlane>;
 
 /// REST routes under `/api/v1`, the MCP endpoint, and the WebDAV vault endpoint.
 pub fn router(cp: Shared) -> Router {
@@ -23,6 +23,7 @@ pub fn router(cp: Shared) -> Router {
         .route("/p/{project}/dav/{branch}", any(crate::dav::dav))
         .route("/p/{project}/dav/{branch}/", any(crate::dav::dav))
         .route("/p/{project}/dav/{branch}/{*rest}", any(crate::dav::dav))
+        .merge(crate::api::routes())
         .with_state(cp)
 }
 
@@ -103,6 +104,19 @@ where
     T: Send + 'static,
     F: FnOnce(&ControlPlane, &ApiKey, MemSearchEngine) -> Result<T, ServerError> + Send + 'static,
 {
+    keyed(cp, headers, move |cp, key| {
+        authorize(key, &project, action)?;
+        f(cp, key, cp.engine(&project)?)
+    })
+    .await
+}
+
+/// Verifies the bearer key, then runs `f` off the async runtime.
+pub(crate) async fn keyed<T, F>(cp: Shared, headers: HeaderMap, f: F) -> Result<T, ServerError>
+where
+    T: Send + 'static,
+    F: FnOnce(&ControlPlane, &ApiKey) -> Result<T, ServerError> + Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
         let token = headers
             .get("authorization")
@@ -110,8 +124,7 @@ where
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or(ServerError::Unauthorized)?;
         let key = cp.verify(token.trim())?;
-        authorize(&key, &project, action)?;
-        f(&cp, &key, cp.engine(&project)?)
+        f(&cp, &key)
     })
     .await
     .map_err(|e| ServerError::Internal(format!("blocking task failed: {e}")))?
