@@ -76,6 +76,29 @@ WebDAV vault behavior (S3):
 - Startup: `mem serve` commits every branch whose workspace still holds changes (for example after a restart inside the idle window), with author `system:startup`, message `startup: commit <N> leftover change(s)`, and one audit row `startup.commit` per commit.
 - Obsidian (Remotely Save plugin, WebDAV): server address `https://<host>/p/<project>/dav/main/`, any username, password = API key (a `dev` or `pm` key to push, a `bot` key for read-only).
 
+REST API behavior (S4a). All routes need `Authorization: Bearer <key>`. Project routes check the project scope first (403), then the role permission. `branch` defaults to `main`; branch names go URL-encoded in the query (`draft%2Fx`).
+
+| Route | Permission | Result |
+|---|---|---|
+| `GET /api/v1/me` | any key | `{name, role, projects}` (`projects: null` = all) |
+| `GET /api/v1/projects` | any key | projects in the key scope |
+| `POST /api/v1/projects` `{slug}` | global admin | 201; audit `project.create` |
+| `GET/POST /api/v1/keys`, `DELETE /api/v1/keys/{id}` | global admin | list (never hashes or secrets) / 201 `{key, secret}` (secret shown once) / 204, 404 if not active |
+| `GET .../projects/{p}/audit?limit=` | Manage | newest first, max 1000 |
+| `GET .../branches` | Read | `{name, head, changes}` sorted by name; `changes` = staged workspace entries |
+| `GET .../tree?branch=&prefix=` | Read | workspace view: `{path, blob_id, content_type, updated_at_ms}` |
+| `GET .../log?branch=&limit=` | Read | commits, max 500 |
+| `GET .../status?branch=` | Read | staged changes `{path, op: upsert\|delete}` |
+| `GET .../diff?base=&target=` | Read | revision = 64-hex commit, `workspace:<branch>`, or a branch name (its head) |
+| `GET .../search?q=&branch=&prefix=&limit=` | Read | hybrid search over the branch workspace, max 50 |
+| `GET .../raw?path=&branch=` | Read | bytes; only png/jpeg/gif/webp inline, `text/*` as `text/plain`, all else `application/octet-stream` + `Content-Disposition: attachment`; always `nosniff`, `no-store`, `CSP: sandbox; default-src 'none'` (stored types can come from MCP metadata, and the web client shares the origin) |
+| `GET .../read`, `POST .../write` | Read / Write | S1 (unchanged) |
+| `POST .../commit` `{message, branch?}` | Write | author = key name; 400 if nothing is staged; audit `rest.commit` |
+| `DELETE .../files?path=&branch=` | Write | `{deleted}` (file or folder); 404 if nothing matched; audit `rest.delete` |
+| `PUT .../raw?path=&branch=` (body = bytes) | Write | images only, same rule as WebDAV attachments; 8 MiB -> 413; not indexed; audit `rest.upload` |
+| `POST .../branches` `{name, from?}` | Branch | 201; `~` is rejected (WebDAV uses it for `/`); audit `rest.branch` |
+| `POST .../merge` `{source, target?, strategy?}` | Branch | `{outcome: fast_forward\|merged, commit_id}`; conflict -> 409 `{conflicts}` and no change; audit `rest.merge`. The engine writes merge commits with author `mem-vcs`; the audit row names the key. |
+
 CLI additions: `mem serve --data <dir> --listen <addr>`, `mem admin project create|list`, `mem admin key create|list|revoke`. First start on an empty data directory prints a one-time `admin` key.
 
 ## 6. Crate changes

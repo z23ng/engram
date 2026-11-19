@@ -180,7 +180,20 @@ async fn search(
     .await
 }
 
-/// File bytes with the stored content type; `nosniff` keeps browsers from guessing a type.
+/// Stored types come from MCP/ingest metadata too, so only inert types are served inline:
+/// the 4 image types, and `text/*` as plain text. Everything else downloads as octet-stream.
+fn served_type(stored: &str) -> (&'static str, bool) {
+    match stored {
+        "image/png" => ("image/png", true),
+        "image/jpeg" => ("image/jpeg", true),
+        "image/gif" => ("image/gif", true),
+        "image/webp" => ("image/webp", true),
+        t if t.starts_with("text/") => ("text/plain; charset=utf-8", true),
+        _ => ("application/octet-stream", false),
+    }
+}
+
+/// File bytes for the web client (images in the Markdown preview); never active content.
 async fn raw(
     State(cp): State<Shared>,
     Path(p): Path<String>,
@@ -193,16 +206,24 @@ async fn raw(
             .vcs()
             .read(&Revision::BranchWorkspace(q.branch()), &path)?
             .ok_or_else(|| ServerError::NotFound(format!("'{}' not found", path.as_str())))?;
-        let content_type = HeaderValue::from_str(&node.metadata.content_type)
-            .unwrap_or(HeaderValue::from_static("application/octet-stream"));
-        let headers = [
-            (header::CONTENT_TYPE, content_type),
-            (
-                header::X_CONTENT_TYPE_OPTIONS,
-                HeaderValue::from_static("nosniff"),
-            ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
-        ];
+        let (content_type, inline) = served_type(&node.metadata.content_type);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("sandbox; default-src 'none'"),
+        );
+        if !inline {
+            headers.insert(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("attachment"),
+            );
+        }
         Ok((headers, node.content).into_response())
     })
     .await

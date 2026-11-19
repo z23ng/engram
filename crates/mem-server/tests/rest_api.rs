@@ -429,3 +429,273 @@ async fn browse_endpoints_check_scope_and_branch() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+async fn upload(f: &Fixture, key: &str, path: &str, body: Vec<u8>) -> StatusCode {
+    let req = Request::put(format!("/api/v1/projects/alpha/raw?path={path}"))
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "image/png")
+        .body(Body::from(body))
+        .unwrap();
+    f.app.clone().oneshot(req).await.unwrap().status()
+}
+
+fn audit_ops(f: &Fixture) -> Vec<String> {
+    f.cp.list_audit("alpha", 50)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.operation)
+        .collect()
+}
+
+#[tokio::test]
+async fn commit_and_delete_use_the_key_author_and_are_audited() {
+    let f = fixture();
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    rest_write(&f, &dev, "/semantic/a.md", "a", None).await;
+    let (status, c) = call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/commit",
+        Some(&dev),
+        Some(json!({"message": "save"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{c}");
+    let log = engine_vcs(&f).log("main", 1).unwrap();
+    assert_eq!(
+        (log[0].author.as_str(), log[0].commit_id.to_hex()),
+        ("dev", c["commit_id"].as_str().unwrap().to_string())
+    );
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/commit",
+        Some(&dev),
+        Some(json!({"message": "empty"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "nothing to commit");
+
+    let (status, d) = call(
+        &f,
+        "DELETE",
+        "/api/v1/projects/alpha/files?path=/semantic/a.md",
+        Some(&dev),
+        None,
+    )
+    .await;
+    assert_eq!((status, d), (StatusCode::OK, json!({"deleted": 1})));
+    let (_, st) = call(&f, "GET", "/api/v1/projects/alpha/status", Some(&dev), None).await;
+    assert_eq!(st["changes"][0]["op"], "delete");
+    let (status, _) = call(
+        &f,
+        "DELETE",
+        "/api/v1/projects/alpha/files?path=/semantic/zz.md",
+        Some(&dev),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(audit_ops(&f), ["rest.delete", "rest.commit", "rest.write"]);
+}
+
+#[tokio::test]
+async fn upload_accepts_images_only_below_attachments() {
+    use mem_core::{Revision, VirtualPath};
+    use mem_vcs::VersionControlEngine;
+    let f = fixture();
+    let pm = key(&f, "pm", Role::Pm, Some(&["alpha"]));
+    let png = vec![0x89, b'P', b'N', b'G', 0xff];
+    assert_eq!(
+        upload(&f, &pm, "/semantic/_attachments/x.png", png.clone()).await,
+        StatusCode::OK
+    );
+    let vp = VirtualPath::new("/semantic/_attachments/x.png").unwrap();
+    let node = engine_vcs(&f)
+        .read(&Revision::BranchWorkspace("main".into()), &vp)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (node.content, node.metadata.content_type.as_str()),
+        (png.clone(), "image/png")
+    );
+    for denied in [
+        "/semantic/x.png",
+        "/core/_attachments/x.png",
+        "/semantic/_attachments/x.svg",
+    ] {
+        assert_eq!(
+            upload(&f, &pm, denied, png.clone()).await,
+            StatusCode::FORBIDDEN,
+            "{denied}"
+        );
+    }
+    let big = vec![0u8; 8 * 1024 * 1024 + 1];
+    assert_eq!(
+        upload(&f, &pm, "/semantic/_attachments/big.png", big).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(audit_ops(&f), ["rest.upload"]);
+}
+
+#[tokio::test]
+async fn branch_create_and_merge_need_branch_permission() {
+    let f = fixture();
+    let pm = key(&f, "pm", Role::Pm, Some(&["alpha"]));
+    rest_write(&f, &pm, "/semantic/shared.md", "base", Some("base")).await;
+    let body = json!({"name": "draft/pm", "from": "main"});
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/branches",
+        Some(&pm),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        call(
+            &f,
+            "POST",
+            "/api/v1/projects/alpha/branches",
+            Some(&pm),
+            Some(body)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let draft = json!({"path": "/semantic/new.md", "content": "n", "branch": "draft/pm", "commit_message": "draft"});
+    call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/write",
+        Some(&pm),
+        Some(draft),
+    )
+    .await;
+    let merge = json!({"source": "draft/pm", "target": "main"});
+    let (status, m) = call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/merge",
+        Some(&pm),
+        Some(merge.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{m}");
+    assert!(m["commit_id"].is_string(), "{m}");
+    let (_, tree) = call(&f, "GET", "/api/v1/projects/alpha/tree", Some(&pm), None).await;
+    assert!(tree.to_string().contains("/semantic/new.md"));
+
+    for (branch, text) in [("main", "ours"), ("draft/pm", "theirs")] {
+        let w = json!({"path": "/semantic/shared.md", "content": text, "branch": branch, "commit_message": text});
+        call(
+            &f,
+            "POST",
+            "/api/v1/projects/alpha/write",
+            Some(&pm),
+            Some(w),
+        )
+        .await;
+    }
+    let (status, conflict) = call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/merge",
+        Some(&pm),
+        Some(merge),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["conflicts"][0]["path"], "/semantic/shared.md");
+    let ops = audit_ops(&f);
+    assert!(
+        ops.contains(&"rest.branch".to_string()) && ops.contains(&"rest.merge".to_string()),
+        "{ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn bot_cannot_change_anything() {
+    let f = fixture();
+    let bot = key(&f, "bot", Role::Bot, Some(&["alpha"]));
+    let p = "/api/v1/projects/alpha";
+    let cases = [
+        ("POST", format!("{p}/commit"), Some(json!({"message": "m"}))),
+        ("DELETE", format!("{p}/files?path=/semantic/a.md"), None),
+        ("POST", format!("{p}/branches"), Some(json!({"name": "x"}))),
+        (
+            "POST",
+            format!("{p}/merge"),
+            Some(json!({"source": "main"})),
+        ),
+    ];
+    for (method, uri, body) in cases {
+        assert_eq!(
+            call(&f, method, &uri, Some(&bot), body).await.0,
+            StatusCode::FORBIDDEN,
+            "{method} {uri}"
+        );
+    }
+    assert_eq!(
+        upload(&f, &bot, "/semantic/_attachments/x.png", vec![1]).await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(audit_ops(&f).is_empty());
+}
+
+#[tokio::test]
+async fn raw_never_serves_active_content_inline() {
+    use mem_core::{MemoryNode, VirtualPath};
+    let f = fixture();
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    let cases = [
+        (
+            "/semantic/x.md",
+            "text/html",
+            "text/plain; charset=utf-8",
+            None,
+        ),
+        (
+            "/semantic/y.md",
+            "application/xhtml+xml",
+            "application/octet-stream",
+            Some("attachment"),
+        ),
+        (
+            "/semantic/z.md",
+            "image/svg+xml",
+            "application/octet-stream",
+            Some("attachment"),
+        ),
+        (
+            "/semantic/w.md",
+            "text/markdown",
+            "text/plain; charset=utf-8",
+            None,
+        ),
+    ];
+    for (path, stored, served, disposition) in cases {
+        let mut node = MemoryNode::new(
+            VirtualPath::new(path).unwrap(),
+            b"<script>alert(1)</script>".to_vec(),
+        );
+        node.metadata.content_type = stored.into();
+        engine_vcs(&f).write_node("main", node).unwrap();
+        let req = Request::get(format!("/api/v1/projects/alpha/raw?path={path}"))
+            .header("authorization", format!("Bearer {dev}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = f.app.clone().oneshot(req).await.unwrap();
+        let h = resp.headers();
+        assert_eq!(h["content-type"], served, "{stored}");
+        assert_eq!(h["content-security-policy"], "sandbox; default-src 'none'");
+        assert_eq!(
+            h.get("content-disposition").map(|v| v.to_str().unwrap()),
+            disposition,
+            "{stored}"
+        );
+    }
+}

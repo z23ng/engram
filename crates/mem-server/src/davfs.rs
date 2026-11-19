@@ -129,6 +129,12 @@ fn writable(segs: &[String]) -> bool {
     in_tier(segs) && (md || image)
 }
 
+/// Content type of an image path that WebDAV and REST uploads accept; `None` otherwise.
+pub(crate) fn attachment_type(vp: &VirtualPath) -> Option<&'static str> {
+    let segs: Vec<String> = vp.as_str().split('/').skip(1).map(String::from).collect();
+    image_type(vp.as_str()).filter(|_| writable(&segs))
+}
+
 fn file_target(path: &DavPath) -> FsResult<VirtualPath> {
     let segs = segments(path);
     if writable(&segs) {

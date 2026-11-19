@@ -4,6 +4,7 @@ mod api;
 mod audit;
 mod auth;
 mod browse;
+mod changes;
 mod control;
 mod dav;
 mod dav_commit;
