@@ -477,22 +477,22 @@ pub fn encode_f32_vec(v: &[f32]) -> Vec<u8> {
 
 /// Decodes little-endian bytes from SQLite `chunk_index.embedding` back into `Vec<f32>`.
 pub fn decode_f32_vec(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(MemError::Storage(format!(
             "invalid float32 embedding byte length: {}",
             bytes.len()
         )));
     }
     let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in bytes.as_chunks::<4>().0 {
+        out.push(f32::from_le_bytes(*chunk));
     }
     Ok(out)
 }
 
 /// Computes cosine similarity between `a` and raw little-endian `f32` bytes without heap allocation.
 pub fn cosine_similarity_le_bytes(a: &[f32], le_bytes: &[u8]) -> Result<f32> {
-    if le_bytes.len() % 4 != 0 {
+    if !le_bytes.len().is_multiple_of(4) {
         return Err(MemError::Storage(format!(
             "invalid float32 embedding byte length: {}",
             le_bytes.len()
@@ -504,8 +504,8 @@ pub fn cosine_similarity_le_bytes(a: &[f32], le_bytes: &[u8]) -> Result<f32> {
     let mut dot = 0.0f64;
     let mut norm_a = 0.0f64;
     let mut norm_b = 0.0f64;
-    for (&x, chunk) in a.iter().zip(le_bytes.chunks_exact(4)) {
-        let y = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (&x, chunk) in a.iter().zip(le_bytes.as_chunks::<4>().0) {
+        let y = f32::from_le_bytes(*chunk);
         let xf = f64::from(x);
         let yf = f64::from(y);
         dot += xf * yf;

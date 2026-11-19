@@ -525,13 +525,16 @@ fn normalize_tags(role: IngestRole, tier: MemoryTier, user_tags: &[String]) -> V
     out
 }
 
+/// Linked titles, matched paths, and (title, alias) pairs to weave inline.
+type RelatedNotes = (Vec<String>, Vec<VirtualPath>, Vec<(String, String)>);
+
 fn discover_related_notes(
     engine: &MemSearchEngine,
     rev: &Revision,
     target_path: &VirtualPath,
     resolved_title: &str,
     raw_text: &str,
-) -> Result<(Vec<String>, Vec<VirtualPath>, Vec<(String, String)>)> {
+) -> Result<RelatedNotes> {
     let active_anchors = load_active_anchors(engine, rev)?;
     let raw_lower = raw_text.to_ascii_lowercase();
     let title_lower = resolved_title.to_ascii_lowercase();
@@ -621,7 +624,7 @@ fn discover_related_notes(
     }
 
     // Prefer longest match first when weaving inline links so multi-word titles win over sub-terms.
-    weave_pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    weave_pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
     weave_pairs.dedup();
 
     Ok((linked_titles, matched_paths, weave_pairs))
@@ -775,12 +778,8 @@ fn replace_first_unprotected(line: &str, needle: &str, target_title: &str) -> Op
             && (!ascii_bounded || has_ascii_word_boundaries(&line_lower, abs, end))
         {
             let matched_slice = &line[abs..end];
-            let replacement = if matched_slice.eq_ignore_ascii_case(target_title)
-                && matched_slice == target_title
-            {
+            let replacement = if matched_slice == target_title {
                 format!("[[{target_title}]]")
-            } else if matched_slice.eq_ignore_ascii_case(target_title) {
-                format!("[[{target_title}|{matched_slice}]]")
             } else {
                 format!("[[{target_title}|{matched_slice}]]")
             };

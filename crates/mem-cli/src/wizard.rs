@@ -1015,9 +1015,11 @@ fn seed_demo_wiki_notes(vcs: &MemVcs, engine: &MemSearchEngine) -> Result<usize,
 
     for (raw_path, body, imp, tags) in &notes {
         let vpath = VirtualPath::new(*raw_path).map_err(|e| e.to_string())?;
-        let mut meta = MemoryMetadata::default();
-        meta.importance = *imp;
-        meta.tags = tags.iter().map(|s| (*s).to_string()).collect();
+        let meta = MemoryMetadata {
+            importance: *imp,
+            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        };
         let node = MemoryNode::new(vpath.clone(), body.as_bytes().to_vec()).with_metadata(meta);
         let blob_id = vcs.write_node("main", node).map_err(|e| e.to_string())?;
         engine
