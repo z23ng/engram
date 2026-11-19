@@ -699,3 +699,47 @@ async fn raw_never_serves_active_content_inline() {
         );
     }
 }
+
+#[tokio::test]
+async fn merge_commit_uses_the_key_name_as_author() {
+    let f = fixture();
+    let pm = key(&f, "pm-alice", Role::Pm, Some(&["alpha"]));
+    rest_write(&f, &pm, "/semantic/base.md", "base", Some("base")).await;
+    call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/branches",
+        Some(&pm),
+        Some(json!({"name": "draft"})),
+    )
+    .await;
+    for (branch, path) in [
+        ("main", "/semantic/main.md"),
+        ("draft", "/semantic/draft.md"),
+    ] {
+        let w = json!({"path": path, "content": "x", "branch": branch, "commit_message": path});
+        call(
+            &f,
+            "POST",
+            "/api/v1/projects/alpha/write",
+            Some(&pm),
+            Some(w),
+        )
+        .await;
+    }
+    let body = json!({"source": "draft", "target": "main"});
+    let (status, m) = call(
+        &f,
+        "POST",
+        "/api/v1/projects/alpha/merge",
+        Some(&pm),
+        Some(body),
+    )
+    .await;
+    assert_eq!(
+        (status, m["outcome"].as_str()),
+        (StatusCode::OK, Some("merged")),
+        "{m}"
+    );
+    assert_eq!(engine_vcs(&f).log("main", 1).unwrap()[0].author, "pm-alice");
+}

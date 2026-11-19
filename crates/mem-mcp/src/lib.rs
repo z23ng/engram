@@ -286,8 +286,12 @@ fn dispatch_tool(
                 Some("theirs") => MergeStrategy::Theirs,
                 _ => MergeStrategy::Auto,
             };
+            let author = args
+                .get("author")
+                .and_then(Value::as_str)
+                .unwrap_or("mem-vcs");
             let outcome = vcs
-                .merge(source, target, strategy)
+                .merge_as(source, target, strategy, author)
                 .map_err(|e| e.to_string())?;
             let payload = match outcome {
                 MergeOutcome::FastForward(cid) => {
@@ -505,7 +509,8 @@ pub fn mcp_tool_definitions() -> Vec<Value> {
                 "properties": {
                     "source": { "type": "string" },
                     "target": { "type": "string" },
-                    "strategy": { "type": "string", "enum": ["auto", "ours", "theirs"] }
+                    "strategy": { "type": "string", "enum": ["auto", "ours", "theirs"] },
+                    "author": { "type": "string" }
                 },
                 "required": ["source", "target"]
             }

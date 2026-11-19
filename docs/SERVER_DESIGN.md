@@ -97,7 +97,7 @@ REST API behavior (S4a). All routes need `Authorization: Bearer <key>`. Project 
 | `DELETE .../files?path=&branch=` | Write | `{deleted}` (file or folder); 404 if nothing matched; audit `rest.delete` |
 | `PUT .../raw?path=&branch=` (body = bytes) | Write | images only, same rule as WebDAV attachments; 8 MiB -> 413; not indexed; audit `rest.upload` |
 | `POST .../branches` `{name, from?}` | Branch | 201; `~` is rejected (WebDAV uses it for `/`); audit `rest.branch` |
-| `POST .../merge` `{source, target?, strategy?}` | Branch | `{outcome: fast_forward\|merged, commit_id}`; conflict -> 409 `{conflicts}` and no change; audit `rest.merge`. The engine writes merge commits with author `mem-vcs`; the audit row names the key. |
+| `POST .../merge` `{source, target?, strategy?}` | Branch | `{outcome: fast_forward\|merged, commit_id}`; conflict -> 409 `{conflicts}` and no change; audit `rest.merge`. A real merge commit has author = key name (MCP `mem_merge` also overrides `author`). |
 
 Web console behavior (S4b):
 

@@ -72,7 +72,7 @@ pub(crate) async fn mcp(
                 return Ok(Json(resp).into_response());
             }
         };
-        if matches!(tool.as_str(), "mem_commit" | "mem_ingest") {
+        if matches!(tool.as_str(), "mem_commit" | "mem_ingest" | "mem_merge") {
             set_author(&mut req, &key.name);
         }
         let Some(resp) = handle_jsonrpc_request(engine.vcs(), &engine, cp.llm_config(), &req)
@@ -91,7 +91,7 @@ pub(crate) async fn mcp(
     .await
 }
 
-/// Replaces `params.arguments.author` so clients cannot choose the commit author.
+/// Replaces `params.arguments.author` so clients cannot choose the commit (or merge commit) author.
 fn set_author(req: &mut Value, name: &str) {
     let Some(params) = req.get_mut("params").and_then(Value::as_object_mut) else {
         return;

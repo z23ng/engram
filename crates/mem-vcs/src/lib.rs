@@ -222,6 +222,18 @@ impl MemVcs {
     }
 
     /// Returns the current [`CommitId`] targeted by `branch`.
+    /// Same as [`VersionControlEngine::merge`], with `author` on the merge commit.
+    pub fn merge_as(
+        &self,
+        source_branch: &str,
+        target_branch: &str,
+        strategy: MergeStrategy,
+        author: &str,
+    ) -> Result<MergeOutcome> {
+        self.store
+            .with_tx(|tx| merge_branches(tx, source_branch, target_branch, strategy, author))
+    }
+
     pub fn head_commit(&self, branch: &str) -> Result<CommitId> {
         self.store.with_conn(|conn| {
             get_ref_conn(conn, branch)?.ok_or_else(|| MemError::BranchNotFound(branch.to_string()))
@@ -382,8 +394,7 @@ impl VersionControlEngine for MemVcs {
         target_branch: &str,
         strategy: MergeStrategy,
     ) -> Result<MergeOutcome> {
-        self.store
-            .with_tx(|tx| merge_branches(tx, source_branch, target_branch, strategy))
+        self.merge_as(source_branch, target_branch, strategy, "mem-vcs")
     }
 
     fn gc(&self) -> Result<GcStats> {

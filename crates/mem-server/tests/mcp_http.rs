@@ -213,3 +213,27 @@ async fn unmapped_tools_and_unknown_methods_are_denied_by_default() {
         assert!(resp["result"].is_object(), "{allowed}: {resp}");
     }
 }
+
+#[tokio::test]
+async fn mem_merge_commit_uses_the_key_name_as_author() {
+    use mem_core::Revision;
+    use mem_vcs::VersionControlEngine;
+    let f = fixture();
+    let dev = key(&f, "dev-agent", Role::Dev, &["alpha"]);
+    let vcs = f.cp.engine("alpha").unwrap().vcs().clone();
+    vcs.create_branch("feature", &Revision::BranchHead("main".into()))
+        .unwrap();
+    for (branch, path) in [("main", "/semantic/m.md"), ("feature", "/semantic/f.md")] {
+        vcs.write_node(
+            branch,
+            mem_core::MemoryNode::new(mem_core::VirtualPath::new(path).unwrap(), b"x".to_vec()),
+        )
+        .unwrap();
+        vcs.commit(branch, "seed", path).unwrap();
+    }
+    let args = json!({"source": "feature", "target": "main", "author": "spoofed"});
+    let merged = call(&f, "alpha", &dev, "mem_merge", args).await;
+    assert_eq!(merged["isError"], false, "{merged}");
+    assert!(text(&merged).contains("merged"), "{merged}");
+    assert_eq!(vcs.log("main", 1).unwrap()[0].author, "dev-agent");
+}

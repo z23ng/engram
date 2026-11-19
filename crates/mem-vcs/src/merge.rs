@@ -20,6 +20,7 @@ pub fn merge_branches(
     source_branch: &str,
     target_branch: &str,
     strategy: MergeStrategy,
+    author: &str,
 ) -> Result<MergeOutcome> {
     let source_head = get_ref_conn(conn, source_branch)?
         .ok_or_else(|| MemError::BranchNotFound(source_branch.to_string()))?;
@@ -130,7 +131,7 @@ pub fn merge_branches(
         conn,
         &merged_tree_id,
         &[target_head, source_head],
-        "mem-vcs",
+        author,
         &message,
         Utc::now().timestamp_millis(),
     )?;

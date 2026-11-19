@@ -172,18 +172,22 @@ async fn merge(
         move |cp, key, engine| {
             let target = main_or(body.target);
             let strategy = body.strategy.unwrap_or(MergeStrategy::Auto);
-            let (outcome, id) = match engine.vcs().merge(&body.source, &target, strategy)? {
-                MergeOutcome::FastForward(id) => ("fast_forward", id),
-                MergeOutcome::Merged(id) => ("merged", id),
-                MergeOutcome::Conflict {
-                    base_commit,
-                    conflicts,
-                } => {
-                    let body = json!({"outcome": "conflict", "base_commit": base_commit,
+            let (outcome, id) =
+                match engine
+                    .vcs()
+                    .merge_as(&body.source, &target, strategy, &key.name)?
+                {
+                    MergeOutcome::FastForward(id) => ("fast_forward", id),
+                    MergeOutcome::Merged(id) => ("merged", id),
+                    MergeOutcome::Conflict {
+                        base_commit,
+                        conflicts,
+                    } => {
+                        let body = json!({"outcome": "conflict", "base_commit": base_commit,
                     "conflicts": conflicts});
-                    return Ok((StatusCode::CONFLICT, Json(body)));
-                }
-            };
+                        return Ok((StatusCode::CONFLICT, Json(body)));
+                    }
+                };
             cp.record_audit(key, &project, "rest.merge", Some(&id.to_hex()))?;
             let body = json!({"outcome": outcome, "commit_id": id, "target": target});
             Ok((StatusCode::OK, Json(body)))
