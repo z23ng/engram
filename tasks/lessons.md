@@ -26,3 +26,14 @@
 3. Keep a unit test that every entry of `mcp_tool_definitions()` has a `tool_action` mapping.
 ### Relations
 - crates/mem-server/src/mcp.rs, crates/mem-server/tests/mcp_http.rs
+
+## [Rust][dav-server][webdav-branch-url] 2026-11-19 dav-server rejects percent-encoded slash in a path segment
+### Failure Mode
+- Spec placed branch names with `/` URL-encoded in one segment: `/p/alpha/dav/draft%2Fpm-inbox/semantic/d.md`.
+- dav-server 0.12.0 `normalize_path` (src/davpath.rs) decodes each segment and returns `ParseError::InvalidPath` when a decoded segment contains `/`; the PUT returned `400 Bad Request` with an empty body and nothing was written.
+- Rewriting the URI before dav-server is not an option: PROPFIND hrefs would then differ from the URL the client requested.
+### Rules
+1. In WebDAV URLs, write `/` in branch names as `~` (git also forbids `~` in ref names); map `~` -> `/` in the handler and return 400 with a hint when the segment decodes to `/`.
+2. Before designing URL schemes on top of a library router, read its path normalization code for encoded-separator handling.
+### Relations
+- crates/mem-server/src/dav.rs, crates/mem-server/tests/webdav.rs (branches_are_isolated_over_webdav)
