@@ -137,7 +137,11 @@ mem [--db <PATH>] [--config <PATH>] [--provider ollama|openai|disabled] [--json]
 | **`mem ls [PREFIX]`** | 列出分支下活跃记忆路径、重要性评分与短哈希。<br>`mem ls /semantic --branch main` |
 | **`mem search <QUERY>`** | 执行分支隔离的 **BM25 + 向量 + 1-Hop 双链图谱扩散**混合检索。<br>`mem search "BUSY_TIMEOUT" --branch main --prefix /semantic -k 5` |
 | **`mem compile`** | 按 `(importance DESC, path ASC)` 在 `<5ms` 内确定性编译 `/core` 上下文块。<br>`mem compile --max-tokens 1500` |
-| **`mem vault import <DIR>`** | 递归导入本地 Obsidian Vault（自动跳过 `.obsidian/` 与 `.git/` 等隐藏目录）并构建图谱索引。<br>`mem vault import ~/Documents/MyVault --branch main --tier semantic` |
+| **`mem ingest [OPTS] <TEXT \| ->`** | 将 PM / Dev / Bot 的自然语言口语草稿结构化为 Obsidian Wiki 卡片并自动编织 `[[Wikilinks]]`。<br>`mem ingest --role pm --draft "超时重试最多 3 次" --title "Payment Retry"`<br>支持 `--role pm\|dev\|bot`、`--draft`（隔离入 `draft/{role}-inbox`）、`--tag`、`--llm`（可选 `gpt-6-luna`/Ollama 润色，离线自动降级为确定性模板） |
+| **`mem vault init-template <DIR>`** | 一键生成协同 Obsidian Vault 目录骨架（`core/`、`semantic/product/`、`semantic/architecture/`、`procedural/runbooks/`、`episodic/bot-insights/`、`_templates/`）。<br>`mem vault init-template ./team-vault` |
+| **`mem vault import <DIR>`** | 递归导入本地 Obsidian Vault 至指定单一层级（跳过 `.obsidian/`、`.git/` 与 `_templates/`）。<br>`mem vault import ~/Documents/MyVault --branch main --tier semantic --commit` |
+| **`mem vault sync <DIR>`** | 将四层协同 Obsidian Vault 按目录映射全量同步至目标分支（跳过根 `README.md` 与 `_templates/`），并增量构建图谱与向量索引。<br>`mem vault sync ./team-vault --branch main --commit` |
+| **`mem vault export <DIR>`** | 将指定分支工作区或 `--commit <HASH>` 导出为标准四层本地 Obsidian 目录树，便于可视化阅览与双向协作。<br>`mem vault export ./team-vault --branch main` |
 
 ### 3.4 Git 风格版本控制（分支、提交、对比、回滚、合并、GC）
 
@@ -218,6 +222,46 @@ mem config use openai --api-key "sk-your-prod-key"
 mem doctor
 ```
 
+### Recipe 5：PM + 开发 + Bot 多角色协同喂数据（Obsidian Vault + IDE MCP + Draft Inbox）
+
+当团队中 **PM（产品需求/业务规则）**、**开发（架构 ADR/Runbook）** 与 **Bot（线上观察/会话总结）** 共享同一个 Engram 知识库时，建议采用“**分域命名空间 + 双向 Vault + 草稿收件箱分支**”工作流，既降低非研发人员录入成本，又绝对避免垃圾/半成品直接污染 `main`：
+
+1. **Obsidian Vault 协同模板 + `sync` / `export` 双向同步**：
+
+```bash
+# 初始化四层协同目录结构与角色模板（不会覆盖已有笔记）
+mem vault init-template ./team-vault
+
+# 团队成员在 Obsidian 中分别维护：
+#   team-vault/semantic/product/       (PM：PRD、验收口径、FAQ)
+#   team-vault/semantic/architecture/  (开发：ADR、表结构、接口不变量)
+#   team-vault/procedural/runbooks/    (开发/运维：排障 SOP)
+#   team-vault/episodic/bot-insights/  (Bot：会话复盘与边缘案例)
+
+# 双向同步入库与导出快照
+mem vault sync ./team-vault --branch main --commit
+mem vault export ./team-vault --branch main
+```
+
+2. **开发在 IDE 中用 MCP `mem_write` / `mem_ingest` 边写代码边沉淀**：
+   Coding Agent（Cursor / Claude Code / Windsurf）在解决复杂 Bug 或确定接口不变量后，直接调用 MCP 工具 **`mem_write`** 写入精确路径（例如 `/semantic/architecture/idempotency.md`），或调用 **`mem_ingest`** 将讨论结论自动编织成带 `[[Wikilinks]]` 的结构化卡片并 `mem_commit`。
+
+3. **PM / 运营 / Bot 用 `mem ingest --role pm|dev|bot --draft [--llm]` 丢口语草稿进隔离信箱 + 审核合入**：
+
+```bash
+# PM 无需了解文件路径或 Markdown 语法，口语片段自动匹配主干笔记并进入 draft/pm-inbox 隔离分支
+mem ingest --role pm --draft --title "支付超时重试策略" \
+  --tag payment,prd \
+  "所有重试必须遵守 Idempotency Key，最多重试 3 次。"
+
+# 可选开启 --llm，借助已配置的 gpt-6-luna 或本地 Ollama qwen2.5:7b 自动润色分节（端点不可达时零报错退回本地模板）
+mem ingest --role bot --draft --llm "Load test retry succeeded on attempt 2 for checkout API"
+
+# 研发或 PM Owner 审核差异后再合入主干，Bot 在 main 上立即通过 1-Hop 双链搜到最新规范
+mem diff main draft/pm-inbox
+mem merge draft/pm-inbox main
+```
+
 ---
 
 ## 第 5 章：Coding Agent (MCP) 自动挂载与工具参考
@@ -235,12 +279,13 @@ mem mcp install --client cursor
 mem mcp install --client claude-code
 ```
 
-### 5.2 暴露给 Agent 的 10 个核心 MCP Tools
+### 5.2 暴露给 Agent 的 11 个核心 MCP Tools
 
 | 工具名称 | 核心参数 | 功能描述 |
 | :--- | :--- | :--- |
 | **`mem_read`** | `path`, `branch?`, `commit_id?` | 读取指定分支工作区或精确历史 Commit 中的记忆文件 |
 | **`mem_write`** | `path`, `content`, `tags?`, `importance?`, `branch?` | 写入或更新 Markdown 记忆并实时建立 Wiki 图谱与 FTS5 索引 |
+| **`mem_ingest`** | `text`, `role?`, `draft?`, `title?`, `path?`, `tier?`, `tags?`, `use_llm?`, `branch?` | 将自然语言草稿按 `pm/dev/bot` 角色结构化、自动编织 `[[Wikilinks]]` 并支持入 `draft/{role}-inbox` 隔离审查 |
 | **`mem_list`** | `prefix?`, `branch?` | 列出当前分支或某目录前缀下全部活跃记忆节点 |
 | **`mem_search`** | `query`, `prefix?`, `branch?`, `top_k?` | 分支强隔离的 BM25 + Vector + 1-Hop `[[Wikilink]]` 混合检索 |
 | **`mem_compile_core`** | `branch?`, `max_tokens?` | `<5ms` 确定性编译 `/core` 高密度上下文块 |

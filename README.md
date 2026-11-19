@@ -84,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh
 ```mermaid
 flowchart TB
     CLI["mem CLI / onboard / doctor"] --> VFS
-    MCP["Built-in stdio MCP Server (10 Tools)"] --> VFS
+    MCP["Built-in stdio MCP Server (11 Tools)"] --> VFS
     MCP --> Search
     VFS["VFS 4-Tier Namespace (/core | /semantic | /procedural | /episodic)"] --> VCS
     VCS["mem-vcs: Workspace Overlay · Merkle Tree · Zero-Copy Branch · Rewind · 3-Way Merge · GC"] --> Store
@@ -107,19 +107,25 @@ mem config use ollama
 mem config use openai --api-key "sk-..."
 mem config show
 
-# 2. 导入示例或本地 Obsidian 知识库并检索
-mem vault import ./examples/obsidian-vault --branch main --tier semantic
-mem commit -m "import architecture vault"
+# 2. PM + Dev + Bot 协同知识库：初始化模板、双向同步/导出 & 口语草稿自动织链
+mem vault init-template ./team-vault
+mem vault sync ./team-vault --branch main --commit
+mem ingest --role pm --draft --title "Checkout Retry Rule" "All retries obey SQLite WAL busy_timeout."
+mem diff main draft/pm-inbox && mem merge draft/pm-inbox main
+mem vault export ./team-vault --branch main
+
+# 3. 导入单个目录的 Obsidian Vault 并检索
+mem vault import ./examples/obsidian-vault --branch main --tier semantic --commit
 mem search "BUSY_TIMEOUT"
 
-# 3. 多分支试错、对比、合并与防污染回滚
+# 4. 多分支试错、对比、合并与防污染回滚
 mem branch exp/opt --from main
 mem write --branch exp/opt /procedural/tip.md "Set PRAGMA busy_timeout = 5000"
 mem diff main exp/opt
 mem merge exp/opt main
 mem rewind <healthy_commit_id>
 
-# 4. 一键运行多 Agent 分支合并实战示例
+# 5. 一键运行多 Agent 分支合并实战示例
 ./examples/multi_agent_branch_merge.sh
 ```
 

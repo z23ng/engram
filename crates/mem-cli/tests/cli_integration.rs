@@ -161,7 +161,7 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
         }),
     );
     let tools = tools_resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
 
     let write_resp = send_and_read(
         &mut stdin,
@@ -197,6 +197,55 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
     );
     let text = search_resp["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("/semantic/mcp_note.md"));
+
+    // Commit main so draft/pm-inbox branched from main HEAD inherits mcp_note.md.
+    let commit_resp = send_and_read(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "mem_commit",
+                "arguments": { "message": "commit mcp note" }
+            }
+        }),
+    );
+    assert_eq!(commit_resp["result"]["isError"], false);
+
+    let ingest_resp = send_and_read(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "mem_ingest",
+                "arguments": {
+                    "role": "pm",
+                    "draft": true,
+                    "title": "MCP Draft Spec",
+                    "text": "Business rule referencing MCP_ALIAS."
+                }
+            }
+        }),
+    );
+    assert_eq!(ingest_resp["result"]["isError"], false);
+    let ingest_payload: Value =
+        serde_json::from_str(ingest_resp["result"]["content"][0]["text"].as_str().unwrap())
+            .unwrap();
+    assert_eq!(ingest_payload["branch"], "draft/pm-inbox");
+    assert_eq!(
+        ingest_payload["path"],
+        "/semantic/product/mcp-draft-spec.md"
+    );
+    assert!(ingest_payload["linked_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "MCP Note"));
 
     drop(stdin);
     let status = child.wait().unwrap();
@@ -299,4 +348,108 @@ fn cli_onboard_config_switch_and_mcp_auto_wiring() {
     assert_eq!(shown_dev["embedding"]["backend"], "ollama");
     assert_eq!(shown_dev["embedding"]["model"], "bge-m3");
     assert_eq!(shown_dev["consolidate_llm"]["model"], "qwen2.5:7b");
+}
+
+#[test]
+fn cli_collaborative_ingest_and_vault_sync_export() {
+    let dir = tempdir().unwrap();
+    let home_dir = dir.path().join("fake_home");
+    let mem_home = home_dir.join(".ai-memory");
+    let db_path = dir.path().join("collab_cli.db");
+    let vault_dir = dir.path().join("team_vault");
+    let export_dir = dir.path().join("exported_vault");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(mem_bin())
+            .env("HOME", &home_dir)
+            .env("MEM_HOME", &mem_home)
+            .args(["--db", &db_path.to_string_lossy(), "--provider", "disabled"])
+            .args(args)
+            .output()
+            .expect("spawn mem binary")
+    };
+
+    let init_out = run(&["init", "--json"]);
+    assert!(
+        init_out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+
+    let tpl_out = run(&[
+        "vault",
+        "init-template",
+        &vault_dir.to_string_lossy(),
+        "--json",
+    ]);
+    assert!(tpl_out.status.success());
+    let tpl_json: Value = serde_json::from_slice(&tpl_out.stdout).unwrap();
+    assert_eq!(tpl_json["files_created"], 6);
+
+    std::fs::write(
+        vault_dir.join("semantic/architecture/idempotency.md"),
+        "---\ntitle: \"Idempotency Key\"\ntags: [\"role/dev\", \"api\"]\n---\n\n# Idempotency Key\n\nAll write APIs require an X-Idempotency-Key header.\n",
+    )
+    .unwrap();
+
+    let sync_out = run(&[
+        "vault",
+        "sync",
+        &vault_dir.to_string_lossy(),
+        "--commit",
+        "--json",
+    ]);
+    assert!(
+        sync_out.status.success(),
+        "sync failed: {}",
+        String::from_utf8_lossy(&sync_out.stderr)
+    );
+    let sync_json: Value = serde_json::from_slice(&sync_out.stdout).unwrap();
+    assert_eq!(sync_json["stats"]["files_imported"], 2);
+
+    let ingest_out = run(&[
+        "ingest",
+        "--role",
+        "pm",
+        "--draft",
+        "--title",
+        "Payment Retry Rule",
+        "--json",
+        "All retries obey Idempotency Key.",
+    ]);
+    assert!(
+        ingest_out.status.success(),
+        "ingest failed: {}",
+        String::from_utf8_lossy(&ingest_out.stderr)
+    );
+    let ingest_json: Value = serde_json::from_slice(&ingest_out.stdout).unwrap();
+    assert_eq!(ingest_json["branch"], "draft/pm-inbox");
+    assert_eq!(ingest_json["path"], "/semantic/product/payment-retry-rule.md");
+    assert!(ingest_json["linked_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "Idempotency Key"));
+
+    // Must not exist on main before merge.
+    let read_main = run(&["read", "/semantic/product/payment-retry-rule.md"]);
+    assert!(!read_main.status.success());
+
+    let merge_out = run(&["merge", "draft/pm-inbox", "main", "--json"]);
+    assert!(merge_out.status.success());
+
+    let read_after_merge = run(&["read", "/semantic/product/payment-retry-rule.md"]);
+    assert!(read_after_merge.status.success());
+
+    let export_out = run(&["vault", "export", &export_dir.to_string_lossy(), "--json"]);
+    assert!(export_out.status.success());
+    let export_json: Value = serde_json::from_slice(&export_out.stdout).unwrap();
+    assert_eq!(export_json["files_exported"], 3);
+    assert!(export_dir.join("core/system.md").exists());
+    assert!(export_dir
+        .join("semantic/architecture/idempotency.md")
+        .exists());
+    assert!(export_dir
+        .join("semantic/product/payment-retry-rule.md")
+        .exists());
 }

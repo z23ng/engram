@@ -12,11 +12,14 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler::{compile_core, CompiledCoreContext};
-use crate::config::SearchConfig;
+use crate::config::{ConsolidateLlmConfig, SearchConfig};
 use crate::embedder::{
     cosine_similarity_le_bytes, encode_f32_vec, EmbeddingProvider, NoopEmbedder,
 };
-use crate::vault::{import_vault, VaultImportStats};
+use crate::ingest::{ingest_knowledge, IngestOutcome, IngestRequest};
+use crate::vault::{
+    export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats,
+};
 use crate::wiki::{parse_wiki_document, ParsedWikiDocument};
 
 /// Query parameters for branch-isolated hybrid search.
@@ -793,6 +796,33 @@ impl MemSearchEngine {
         target_tier: mem_core::MemoryTier,
     ) -> Result<VaultImportStats> {
         import_vault(self, vault_dir, branch, target_tier)
+    }
+
+    /// Syncs a multi-tier local Obsidian Vault (`core/`, `semantic/`, `procedural/`, `episodic/`) into `branch`.
+    pub fn sync_vault(
+        &self,
+        vault_dir: &std::path::Path,
+        branch: &str,
+    ) -> Result<VaultImportStats> {
+        sync_vault(self, vault_dir, branch)
+    }
+
+    /// Exports all active nodes in `rev` into a local Obsidian Vault directory.
+    pub fn export_vault(
+        &self,
+        rev: &Revision,
+        vault_dir: &std::path::Path,
+    ) -> Result<VaultExportStats> {
+        export_vault(&self.vcs, rev, vault_dir)
+    }
+
+    /// Structures a rough note into an auto-linked Obsidian Markdown card and commits/indexes it.
+    pub fn ingest(
+        &self,
+        req: &IngestRequest,
+        llm_config: Option<&ConsolidateLlmConfig>,
+    ) -> Result<IngestOutcome> {
+        ingest_knowledge(self, req, llm_config)
     }
 }
 

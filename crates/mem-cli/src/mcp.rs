@@ -4,10 +4,13 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use mem_core::{
-    CommitId, DiffKind, MemoryMetadata, MemoryNode, MergeOutcome, MergeStrategy, Revision,
-    VirtualPath,
+    CommitId, DiffKind, MemoryMetadata, MemoryNode, MemoryTier, MergeOutcome, MergeStrategy,
+    Revision, VirtualPath,
 };
-use mem_search::{EmbeddingProviderConfig, MemSearchEngine, SearchRequest};
+use mem_search::{
+    ConsolidateLlmConfig, EmbeddingProviderConfig, IngestRequest, IngestRole, MemSearchEngine,
+    SearchRequest,
+};
 use mem_store::SqliteStore;
 use mem_vcs::{MemVcs, VersionControlEngine};
 use serde_json::{json, Value};
@@ -15,7 +18,11 @@ use serde_json::{json, Value};
 use crate::build_search_engine;
 
 /// Runs a line-delimited JSON-RPC 2.0 MCP server reading from `stdin` and writing to `stdout`.
-pub fn run_stdio_server(db_path: PathBuf, emb_cfg: EmbeddingProviderConfig) -> io::Result<()> {
+pub fn run_stdio_server(
+    db_path: PathBuf,
+    emb_cfg: EmbeddingProviderConfig,
+    llm_cfg: ConsolidateLlmConfig,
+) -> io::Result<()> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -60,7 +67,7 @@ pub fn run_stdio_server(db_path: PathBuf, emb_cfg: EmbeddingProviderConfig) -> i
             }
         };
 
-        if let Some(resp) = handle_jsonrpc_request(&vcs, &engine, &req) {
+        if let Some(resp) = handle_jsonrpc_request(&vcs, &engine, &llm_cfg, &req) {
             write_json_line(&mut out, &resp)?;
         }
     }
@@ -79,6 +86,7 @@ fn write_json_line<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {
 pub fn handle_jsonrpc_request(
     vcs: &MemVcs,
     engine: &MemSearchEngine,
+    llm_cfg: &ConsolidateLlmConfig,
     req: &Value,
 ) -> Option<Value> {
     let id = req.get("id").cloned();
@@ -132,7 +140,7 @@ pub fn handle_jsonrpc_request(
                 return Some(jsonrpc_error(resp_id, -32602, "missing tool 'name'"));
             };
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match dispatch_tool(vcs, engine, name, &args) {
+            match dispatch_tool(vcs, engine, llm_cfg, name, &args) {
                 Ok(text) => Some(json!({
                     "jsonrpc": "2.0",
                     "id": resp_id,
@@ -173,6 +181,7 @@ fn jsonrpc_error(id: Value, code: i32, message: &str) -> Value {
 fn dispatch_tool(
     vcs: &MemVcs,
     engine: &MemSearchEngine,
+    llm_cfg: &ConsolidateLlmConfig,
     name: &str,
     args: &Value,
 ) -> Result<String, String> {
@@ -368,6 +377,62 @@ fn dispatch_tool(
             };
             Ok(serde_json::to_string_pretty(&payload).unwrap_or_default())
         }
+        "mem_ingest" => {
+            let text = req_str(args, "text")?;
+            let role = match args.get("role").and_then(Value::as_str) {
+                Some(raw) => IngestRole::parse(raw).map_err(|e| e.to_string())?,
+                None => IngestRole::Dev,
+            };
+            let draft = args.get("draft").and_then(Value::as_bool).unwrap_or(false);
+            let commit = args.get("commit").and_then(Value::as_bool).unwrap_or(true);
+            let use_llm = args
+                .get("use_llm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            let mut req = IngestRequest::new(role, text)
+                .with_branch(branch.to_string())
+                .with_draft(draft)
+                .with_commit(commit)
+                .with_use_llm(use_llm);
+
+            if let Some(title) = args.get("title").and_then(Value::as_str) {
+                req = req.with_title(title);
+            }
+            if let Some(raw_path) = args.get("path").and_then(Value::as_str) {
+                let vp = VirtualPath::new(raw_path).map_err(|e| e.to_string())?;
+                vp.validate_file_path().map_err(|e| e.to_string())?;
+                req = req.with_path(vp);
+            }
+            if let Some(raw_tier) = args.get("tier").and_then(Value::as_str) {
+                let tier = MemoryTier::from_segment(raw_tier)
+                    .ok_or_else(|| format!("unknown tier '{raw_tier}'"))?;
+                req = req.with_tier(tier);
+            }
+            if let Some(tags_arr) = args.get("tags").and_then(Value::as_array) {
+                let tags: Vec<String> = tags_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                if !tags.is_empty() {
+                    req = req.with_tags(tags);
+                }
+            }
+            if let Some(author) = args.get("author").and_then(Value::as_str) {
+                req = req.with_author(author);
+            }
+            if let Some(importance) = args.get("importance").and_then(Value::as_f64) {
+                req = req.with_importance(importance as f32);
+            }
+            if let Some(msg) = args.get("message").and_then(Value::as_str) {
+                req = req.with_commit_message(msg);
+            }
+
+            let outcome = engine
+                .ingest(&req, Some(llm_cfg))
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string_pretty(&outcome).unwrap_or_default())
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -512,6 +577,29 @@ fn mcp_tool_definitions() -> Vec<Value> {
                     "strategy": { "type": "string", "enum": ["auto", "ours", "theirs"] }
                 },
                 "required": ["source", "target"]
+            }
+        }),
+        json!({
+            "name": "mem_ingest",
+            "description": "Structure rough PM/Dev/Bot notes into an auto-linked Obsidian Markdown card, weave [[Wikilinks]] against active notes, and optionally isolate inside a draft/{role}-inbox branch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "Raw rough note, decision, PRD blurb, or bot observation" },
+                    "role": { "type": "string", "enum": ["pm", "dev", "bot"], "description": "Contributor persona driving default VFS namespace and metadata (default: dev)" },
+                    "branch": { "type": "string", "description": "Target or base branch (default: main)" },
+                    "draft": { "type": "boolean", "description": "Isolate note into draft/{role}-inbox branch instead of mutating main directly" },
+                    "title": { "type": "string", "description": "Optional explicit note title" },
+                    "path": { "type": "string", "description": "Optional explicit VFS path overriding role/tier directory routing" },
+                    "tier": { "type": "string", "enum": ["core", "semantic", "procedural", "episodic"] },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "author": { "type": "string" },
+                    "importance": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                    "commit": { "type": "boolean", "description": "Auto-commit after writing and indexing (default: true)" },
+                    "message": { "type": "string", "description": "Optional commit message" },
+                    "use_llm": { "type": "boolean", "description": "Attempt configured OpenAI/Ollama LLM structuring before deterministic fallback (default: false)" }
+                },
+                "required": ["text"]
             }
         })
     ]

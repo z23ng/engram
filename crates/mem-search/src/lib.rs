@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod config;
 pub mod embedder;
 pub mod hybrid;
+pub mod ingest;
 pub mod vault;
 pub mod wiki;
 
@@ -17,5 +18,9 @@ pub use embedder::{
     OpenAiCompatibleEmbedder,
 };
 pub use hybrid::{IndexingStats, MemSearchEngine, SearchHit, SearchRequest};
-pub use vault::{import_vault, VaultImportStats};
+pub use ingest::{ingest_knowledge, IngestOutcome, IngestRequest, IngestRole};
+pub use vault::{
+    export_vault, import_vault, init_vault_template, sync_vault, VaultExportStats,
+    VaultImportStats, VaultTemplateStats,
+};
 pub use wiki::{parse_wiki_document, EntityTriple, ParsedWikiDocument, WikiChunk, WikiLink};

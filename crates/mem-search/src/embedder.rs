@@ -246,6 +246,15 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
     }
 }
 
+pub(crate) fn post_json_http_or_curl(
+    url: &str,
+    api_key: Option<&str>,
+    body: &str,
+    timeout: Duration,
+) -> Result<String> {
+    http_post_json(url, api_key, body, timeout)
+}
+
 fn http_post_json(
     url: &str,
     api_key: Option<&str>,

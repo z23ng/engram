@@ -18,8 +18,9 @@ use mem_core::{
     MergeStrategy, Result, Revision, VirtualPath,
 };
 use mem_search::{
-    compile_core, parse_wiki_document, ConsolidateLlmConfig, EmbeddingProviderConfig,
-    MemSearchEngine, OpenAiCompatibleEmbedder, ProviderBackend, SearchConfig, SearchRequest,
+    compile_core, export_vault, init_vault_template, parse_wiki_document, ConsolidateLlmConfig,
+    EmbeddingProviderConfig, IngestRequest, IngestRole, MemSearchEngine, OpenAiCompatibleEmbedder,
+    ProviderBackend, SearchConfig, SearchRequest,
 };
 use mem_store::SqliteStore;
 use mem_vcs::{MemVcs, VersionControlEngine};
@@ -196,6 +197,7 @@ fn run() -> std::result::Result<ExitCode, String> {
         "merge" => cmd_merge(&opts, args),
         "search" => cmd_search(&opts, args),
         "compile" => cmd_compile(&opts, args),
+        "ingest" => cmd_ingest(&opts, args),
         "vault" => cmd_vault(&opts, args),
         "gc" => cmd_gc(&opts),
         "doctor" => cmd_doctor(&opts),
@@ -203,7 +205,9 @@ fn run() -> std::result::Result<ExitCode, String> {
             Some("install") => wizard::cmd_mcp_install(&opts, &args[1..]),
             None | Some("serve") => {
                 let emb_cfg = opts.embedding_config();
-                mcp::run_stdio_server(opts.db_path.clone(), emb_cfg).map_err(|e| e.to_string())?;
+                let llm_cfg = opts.consolidate_config();
+                mcp::run_stdio_server(opts.db_path.clone(), emb_cfg, llm_cfg)
+                    .map_err(|e| e.to_string())?;
                 Ok(ExitCode::SUCCESS)
             }
             Some(other) => Err(format!(
@@ -1217,15 +1221,251 @@ fn cmd_compile(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCo
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_vault(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
-    if args.first().map(String::as_str) != Some("import") {
-        return Err("usage: mem vault import <local_dir> [--branch <b>] [--tier semantic|procedural|core|episodic]".to_string());
+fn cmd_ingest(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
+    let mut role = IngestRole::Dev;
+    let mut branch = "main".to_string();
+    let mut draft = false;
+    let mut title: Option<String> = None;
+    let mut path_arg: Option<VirtualPath> = None;
+    let mut tier: Option<MemoryTier> = None;
+    let mut tags: Vec<String> = Vec::new();
+    let mut file_arg: Option<String> = None;
+    let mut author: Option<String> = None;
+    let mut importance: Option<f32> = None;
+    let mut commit = true;
+    let mut commit_message: Option<String> = None;
+    let mut use_llm = false;
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut i = 0usize;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--role" | "-r" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--role requires pm | dev | bot")?;
+                role = IngestRole::parse(raw).map_err(|e| e.to_string())?;
+            }
+            "--branch" | "-b" => {
+                i += 1;
+                branch = args.get(i).ok_or("--branch requires a name")?.clone();
+            }
+            "--draft" => {
+                draft = true;
+            }
+            "--title" => {
+                i += 1;
+                title = Some(args.get(i).ok_or("--title requires a string")?.clone());
+            }
+            "--path" | "-p" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--path requires a VFS path")?;
+                let vp = VirtualPath::new(raw).map_err(|e| e.to_string())?;
+                vp.validate_file_path().map_err(|e| e.to_string())?;
+                path_arg = Some(vp);
+            }
+            "--tier" | "-t" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or("--tier requires core|episodic|semantic|procedural")?;
+                tier = Some(
+                    MemoryTier::from_segment(raw)
+                        .ok_or_else(|| format!("unknown tier '{raw}'"))?,
+                );
+            }
+            "--tag" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--tag requires a tag name")?;
+                for t in raw.split(',') {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() {
+                        tags.push(trimmed.to_string());
+                    }
+                }
+            }
+            "--file" | "-f" => {
+                i += 1;
+                file_arg = Some(args.get(i).ok_or("--file requires a local path")?.clone());
+            }
+            "--author" => {
+                i += 1;
+                author = Some(args.get(i).ok_or("--author requires a name")?.clone());
+            }
+            "--importance" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--importance requires a float 0.0..1.0")?;
+                importance = Some(
+                    raw.parse::<f32>()
+                        .map_err(|_| format!("invalid --importance '{raw}'"))?,
+                );
+            }
+            "--no-commit" => {
+                commit = false;
+            }
+            "-m" | "--message" => {
+                i += 1;
+                commit_message = Some(args.get(i).ok_or("-m requires a commit message")?.clone());
+            }
+            "--llm" => {
+                use_llm = true;
+            }
+            other => {
+                text_parts.push(other.to_string());
+            }
+        }
+        i += 1;
     }
 
+    let raw_text = if let Some(local_path) = file_arg {
+        fs::read_to_string(&local_path)
+            .map_err(|e| format!("failed to read '{local_path}': {e}"))?
+    } else if text_parts.len() == 1 && text_parts[0] == "-" {
+        let mut buf = String::new();
+        io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("failed to read stdin: {e}"))?;
+        buf
+    } else if !text_parts.is_empty() {
+        text_parts.join(" ")
+    } else if !io::stdin().is_terminal() {
+        let mut buf = String::new();
+        io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("failed to read stdin: {e}"))?;
+        buf
+    } else {
+        return Err(
+            "usage: mem ingest [--role pm|dev|bot] [--draft] [--title <T>] [--path <VFS>] [--tier <T>] [--tag <TAG>] [--file <PATH>] [--llm] <TEXT | ->"
+                .to_string(),
+        );
+    };
+
+    let (_, vcs) = open_existing_vcs(&opts.db_path)?;
+    let emb_cfg = opts.embedding_config();
+    let llm_cfg = opts.consolidate_config();
+    let (engine, notice) = build_search_engine(vcs, &emb_cfg);
+    if let Some(msg) = notice {
+        if !opts.json {
+            eprintln!("note: {msg}");
+        }
+    }
+
+    let mut req = IngestRequest::new(role, raw_text)
+        .with_branch(branch)
+        .with_draft(draft)
+        .with_commit(commit)
+        .with_use_llm(use_llm);
+    if let Some(t) = title {
+        req = req.with_title(t);
+    }
+    if let Some(p) = path_arg {
+        req = req.with_path(p);
+    }
+    if let Some(tr) = tier {
+        req = req.with_tier(tr);
+    }
+    if !tags.is_empty() {
+        req = req.with_tags(tags);
+    }
+    if let Some(a) = author {
+        req = req.with_author(a);
+    }
+    if let Some(imp) = importance {
+        req = req.with_importance(imp);
+    }
+    if let Some(msg) = commit_message {
+        req = req.with_commit_message(msg);
+    }
+
+    let outcome = engine
+        .ingest(&req, Some(&llm_cfg))
+        .map_err(|e| e.to_string())?;
+
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&outcome).unwrap());
+    } else {
+        println!(
+            "{} [{}] {} -> {} (branch: {})",
+            paint(opts.use_color, "32;1", "Ingested"),
+            outcome.role.as_str(),
+            outcome.title,
+            outcome.path,
+            outcome.branch
+        );
+        if let Some(cid) = outcome.commit_id {
+            println!("  commit : {}", &cid.to_hex()[..12]);
+        }
+        println!(
+            "  mode   : {}",
+            if outcome.used_llm {
+                format!("LLM ({})", llm_cfg.model)
+            } else {
+                "deterministic Obsidian weaver".to_string()
+            }
+        );
+        if !outcome.linked_notes.is_empty() {
+            let links = outcome
+                .linked_notes
+                .iter()
+                .map(|l| format!("[[{l}]]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("  links  : {links}");
+        }
+        if draft {
+            println!(
+                "  review : mem diff main {} && mem merge {} main",
+                outcome.branch, outcome.branch
+            );
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_vault(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    match sub {
+        "init-template" => cmd_vault_init_template(opts, &args[1..]),
+        "import" => cmd_vault_import(opts, &args[1..]),
+        "sync" => cmd_vault_sync(opts, &args[1..]),
+        "export" => cmd_vault_export(opts, &args[1..]),
+        _ => Err(
+            "usage: mem vault <init-template|import|sync|export> <local_dir> [options]".to_string(),
+        ),
+    }
+}
+
+fn cmd_vault_init_template(
+    opts: &GlobalOpts,
+    args: &[String],
+) -> std::result::Result<ExitCode, String> {
+    let vault_dir = args
+        .first()
+        .ok_or("usage: mem vault init-template <local_dir>")?;
+    let stats = init_vault_template(Path::new(vault_dir)).map_err(|e| e.to_string())?;
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+    } else {
+        println!(
+            "{} collaborative Obsidian Vault template at {}\n  created: {} file(s), preserved existing: {} file(s)\n  next   : edit notes in Obsidian, then run 'mem vault sync {} --commit'",
+            paint(opts.use_color, "32;1", "Scaffolded"),
+            stats.vault_dir,
+            stats.files_created,
+            stats.files_skipped,
+            vault_dir
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_vault_import(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
     let mut branch = "main".to_string();
     let mut tier = MemoryTier::Semantic;
+    let mut commit = false;
+    let mut message: Option<String> = None;
     let mut dir_arg: Option<String> = None;
-    let mut i = 1usize;
+    let mut i = 0usize;
 
     while i < args.len() {
         match args[i].as_str() {
@@ -1235,9 +1475,18 @@ fn cmd_vault(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
             }
             "--tier" | "-t" => {
                 i += 1;
-                let raw = args.get(i).ok_or("--tier requires core|episodic|semantic|procedural")?;
+                let raw = args
+                    .get(i)
+                    .ok_or("--tier requires core|episodic|semantic|procedural")?;
                 tier = MemoryTier::from_segment(raw)
                     .ok_or_else(|| format!("unknown tier '{raw}'"))?;
+            }
+            "--commit" => {
+                commit = true;
+            }
+            "-m" | "--message" => {
+                i += 1;
+                message = Some(args.get(i).ok_or("-m requires a commit message")?.clone());
             }
             other => {
                 if dir_arg.is_none() {
@@ -1263,9 +1512,27 @@ fn cmd_vault(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
     let stats = engine
         .import_vault(Path::new(&vault_dir), &branch, tier)
         .map_err(|e| e.to_string())?;
+    let commit_id = if commit {
+        let msg = message.unwrap_or_else(|| format!("import vault '{vault_dir}' into /{}", tier.as_str()));
+        Some(
+            engine
+                .vcs()
+                .commit(&branch, "vault-import@engram", &msg)
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
 
     if opts.json {
-        println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "stats": stats,
+                "commit_id": commit_id.map(|c| c.to_hex()),
+            }))
+            .unwrap()
+        );
     } else {
         println!(
             "{} {} markdown file(s) into '{}' (/{})\n  indexed: {} new blob(s), {} deduplicated, {} wiki/tag/entity links extracted",
@@ -1276,6 +1543,143 @@ fn cmd_vault(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode
             stats.blobs_newly_indexed,
             stats.blobs_deduplicated,
             stats.links_extracted
+        );
+        if let Some(cid) = commit_id {
+            println!("  commit : {}", &cid.to_hex()[..12]);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_vault_sync(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
+    let mut branch = "main".to_string();
+    let mut commit = false;
+    let mut message: Option<String> = None;
+    let mut dir_arg: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--branch" | "-b" => {
+                i += 1;
+                branch = args.get(i).ok_or("--branch requires a name")?.clone();
+            }
+            "--commit" => {
+                commit = true;
+            }
+            "-m" | "--message" => {
+                i += 1;
+                message = Some(args.get(i).ok_or("-m requires a commit message")?.clone());
+            }
+            other => {
+                if dir_arg.is_none() {
+                    dir_arg = Some(other.to_string());
+                } else {
+                    return Err(format!("unexpected argument '{other}'"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let vault_dir = dir_arg.ok_or("usage: mem vault sync <local_dir> [--branch <b>] [--commit]")?;
+    let (_, vcs) = open_existing_vcs(&opts.db_path)?;
+    let emb_cfg = opts.embedding_config();
+    let (engine, notice) = build_search_engine(vcs, &emb_cfg);
+    if let Some(msg) = notice {
+        if !opts.json {
+            eprintln!("note: {msg}");
+        }
+    }
+
+    let stats = engine
+        .sync_vault(Path::new(&vault_dir), &branch)
+        .map_err(|e| e.to_string())?;
+    let commit_id = if commit {
+        let msg = message.unwrap_or_else(|| format!("sync multi-tier vault '{vault_dir}'"));
+        Some(
+            engine
+                .vcs()
+                .commit(&branch, "vault-sync@engram", &msg)
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+
+    if opts.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "stats": stats,
+                "commit_id": commit_id.map(|c| c.to_hex()),
+            }))
+            .unwrap()
+        );
+    } else {
+        println!(
+            "{} {} markdown file(s) across all tiers into '{}' ({} skipped)\n  indexed: {} new blob(s), {} deduplicated, {} wiki/tag/entity links extracted",
+            paint(opts.use_color, "32;1", "Synced"),
+            stats.files_imported,
+            branch,
+            stats.files_skipped,
+            stats.blobs_newly_indexed,
+            stats.blobs_deduplicated,
+            stats.links_extracted
+        );
+        if let Some(cid) = commit_id {
+            println!("  commit : {}", &cid.to_hex()[..12]);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_vault_export(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
+    let mut branch = "main".to_string();
+    let mut commit_override: Option<String> = None;
+    let mut dir_arg: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--branch" | "-b" => {
+                i += 1;
+                branch = args.get(i).ok_or("--branch requires a name")?.clone();
+            }
+            "--commit" => {
+                i += 1;
+                commit_override = Some(args.get(i).ok_or("--commit requires a hash")?.clone());
+            }
+            other => {
+                if dir_arg.is_none() {
+                    dir_arg = Some(other.to_string());
+                } else {
+                    return Err(format!("unexpected argument '{other}'"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let vault_dir =
+        dir_arg.ok_or("usage: mem vault export <local_dir> [--branch <b> | --commit <hash>]")?;
+    let (_, vcs) = open_existing_vcs(&opts.db_path)?;
+    let rev = if let Some(cid_raw) = commit_override {
+        let cid = CommitId::from_hex(&cid_raw).map_err(|e| e.to_string())?;
+        Revision::Commit(cid)
+    } else {
+        Revision::BranchWorkspace(branch.clone())
+    };
+
+    let stats = export_vault(&vcs, &rev, Path::new(&vault_dir)).map_err(|e| e.to_string())?;
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+    } else {
+        println!(
+            "{} {} memory node(s) to {}",
+            paint(opts.use_color, "32;1", "Exported"),
+            stats.files_exported,
+            stats.vault_dir
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -1470,7 +1874,8 @@ MEMORY & VCS COMMANDS:
   merge <SRC> <DST>           Three-way merge source branch into target branch
   search <QUERY>              Branch-isolated BM25 + Vector + 1-hop Obsidian Wiki search
   compile                     Compile /core memories into <core_memory> block (<5ms)
-  vault import <DIR>          Import a local Obsidian Vault (.md) directory
+  ingest [OPTS] <TEXT | ->    Structure PM/Dev/Bot rough notes with auto-[[Wikilinks]] (--draft)
+  vault <SUBCMD> <DIR>        Obsidian Vault bridge: init-template | import | sync | export
   gc                          Run mark-and-sweep garbage collection
   doctor                      Verify SQLite FTS5/Wiki Graph, provider connectivity, and latency
   mcp [serve]                 Start stdio JSON-RPC 2.0 MCP Server for Coding Agents

@@ -6,13 +6,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mem_core::{MemoryMetadata, MemoryNode, MemoryTier, Result, Revision, VirtualPath};
+use mem_core::{
+    MemoryMetadata, MemoryNode, MemoryTier, MergeStrategy, Result, Revision, VirtualPath,
+};
 use mem_store::SqliteStore;
 use mem_vcs::{MemVcs, VersionControlEngine};
 use mem_search::{
-    compile_core, ConsolidateLlmConfig, DeterministicHashEmbedder, EmbeddingProvider,
-    EmbeddingProviderConfig, MemConfig, MemSearchEngine, OpenAiCompatibleEmbedder,
-    ProviderBackend, SearchConfig, SearchRequest,
+    compile_core, init_vault_template, ConsolidateLlmConfig, DeterministicHashEmbedder,
+    EmbeddingProvider, EmbeddingProviderConfig, IngestRequest, IngestRole, MemConfig,
+    MemSearchEngine, OpenAiCompatibleEmbedder, ProviderBackend, SearchConfig, SearchRequest,
 };
 use tempfile::tempdir;
 
@@ -696,4 +698,93 @@ fn core_compiler_budget_and_local_obsidian_vault_import() {
     assert!(cross_hits
         .iter()
         .any(|h| h.path == vp("/semantic/runbooks/fix-lock.md")));
+}
+
+#[test]
+fn collaborative_pm_dev_bot_ingest_draft_merge_and_vault_roundtrip() {
+    let dir = tempdir().unwrap();
+    let vault = dir.path().join("collab_vault");
+    let tpl_stats = init_vault_template(&vault).unwrap();
+    assert_eq!(tpl_stats.files_created, 6);
+
+    // Developer adds architecture note inside multi-tier Obsidian vault.
+    fs::write(
+        vault.join("semantic/architecture/wal-mode.md"),
+        "---\ntitle: \"SQLite WAL Mode\"\naliases: [\"WAL\"]\ntags: [\"role/dev\", \"sqlite\"]\nimportance: 0.90\n---\n\n# SQLite WAL Mode\n\nUse WAL journaling and busy_timeout=5000ms.\n",
+    )
+    .unwrap();
+
+    let store = SqliteStore::open_in_memory().unwrap();
+    let vcs = MemVcs::new(store);
+    vcs.init().unwrap();
+    let engine = MemSearchEngine::new_bm25_only(vcs.clone());
+
+    let sync_stats = engine.sync_vault(&vault, "main").unwrap();
+    assert_eq!(sync_stats.files_imported, 2); // core/system.md + semantic/architecture/wal-mode.md
+    vcs.commit("main", "dev@engram", "sync starter vault & wal ADR")
+        .unwrap();
+
+    // PM ingests a natural-language note into --draft (isolated in draft/pm-inbox).
+    let pm_req = IngestRequest::new(
+        IngestRole::Pm,
+        "Checkout retry policy must tolerate WAL lock contention up to 3 attempts.",
+    )
+    .with_title("Checkout Retry Policy")
+    .with_tags(["checkout", "prd"])
+    .with_draft(true);
+
+    let pm_out = engine.ingest(&pm_req, None).unwrap();
+    assert_eq!(pm_out.branch, "draft/pm-inbox");
+    assert_eq!(
+        pm_out.path,
+        vp("/semantic/product/checkout-retry-policy.md")
+    );
+    assert!(pm_out.markdown.contains("[[SQLite WAL Mode"));
+    assert!(vcs
+        .read(&Revision::BranchWorkspace("main".into()), &pm_out.path)
+        .unwrap()
+        .is_none());
+
+    // Merge approved PM draft into main and verify cross-role graph recall.
+    vcs.merge("draft/pm-inbox", "main", MergeStrategy::Auto)
+        .unwrap();
+    let main_hits = engine
+        .search(&SearchRequest::new(
+            Revision::BranchWorkspace("main".into()),
+            "SQLite WAL Mode",
+        ))
+        .unwrap();
+    assert!(main_hits
+        .iter()
+        .any(|h| h.path == vp("/semantic/architecture/wal-mode.md")));
+    assert!(main_hits
+        .iter()
+        .any(|h| h.path == vp("/semantic/product/checkout-retry-policy.md")));
+
+    // Bot records an episodic observation on main.
+    let bot_req = IngestRequest::new(
+        IngestRole::Bot,
+        "Observed checkout retries succeeding on attempt 2 during load test.",
+    )
+    .with_title("Checkout Retry Load Observation");
+    let bot_out = engine.ingest(&bot_req, None).unwrap();
+    assert!(bot_out
+        .path
+        .as_str()
+        .starts_with("/episodic/bot-insights/"));
+
+    // Export main snapshot back to local Obsidian directory layout.
+    let export_dir = dir.path().join("exported_vault");
+    let export_stats = engine
+        .export_vault(&Revision::BranchWorkspace("main".into()), &export_dir)
+        .unwrap();
+    assert_eq!(export_stats.files_exported, 4);
+    assert!(export_dir.join("core/system.md").exists());
+    assert!(export_dir.join("semantic/architecture/wal-mode.md").exists());
+    assert!(export_dir
+        .join("semantic/product/checkout-retry-policy.md")
+        .exists());
+    assert!(export_dir
+        .join(bot_out.path.as_str().trim_start_matches('/'))
+        .exists());
 }
