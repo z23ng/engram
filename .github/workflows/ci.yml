@@ -52,3 +52,28 @@ jobs:
 
       - name: Run clippy with warnings denied
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run web unit tests
+        run: npm test
+
+      - name: Type-check and build the embedded console
+        run: npm run build

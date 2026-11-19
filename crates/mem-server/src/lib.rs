@@ -13,6 +13,7 @@ mod error;
 mod http;
 mod keys;
 mod mcp;
+mod web;
 
 use std::sync::Arc;
 

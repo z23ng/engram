@@ -37,3 +37,13 @@
 2. Before designing URL schemes on top of a library router, read its path normalization code for encoded-separator handling.
 ### Relations
 - crates/mem-server/src/dav.rs, crates/mem-server/tests/webdav.rs (branches_are_isolated_over_webdav)
+
+## [Web][Vite-CSP][web-dist] 2026-11-19 Vite inlined small fonts as data: URIs that the server CSP blocks
+### Failure Mode
+- `npm run build` with default `build.assetsInlineLimit` (4 KiB) turned small `.woff2` subsets into `data:font/woff2;base64,...` inside the CSS.
+- The console page sends `font-src 'self'`; Chromium logged `Loading the font 'data:font/woff2;base64,...' violates the following Content Security Policy directive: "font-src 'self'"`. Unit tests and the Rust routing test passed; only a real browser run showed it.
+### Rules
+1. Keep `build.assetsInlineLimit: 0` in `web/vite.config.ts` while the CSP forbids `data:` for fonts and scripts; do not widen the CSP instead.
+2. After any change to `web/` build config or `crates/mem-server/src/web.rs` CSP, load the console in a browser and check the console for CSP errors (`grep -c 'data:font' web/dist/assets/*.css` must print 0).
+### Relations
+- web/vite.config.ts, crates/mem-server/src/web.rs (CSP), crates/mem-server/tests/web_ui.rs

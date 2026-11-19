@@ -26,6 +26,7 @@ pub fn router(cp: Shared) -> Router {
         .merge(crate::api::routes())
         .merge(crate::browse::routes())
         .merge(crate::changes::routes())
+        .fallback(crate::web::fallback)
         .with_state(cp)
 }
 

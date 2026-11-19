@@ -43,4 +43,5 @@ bytes = "1.12"
 futures-util = "0.3"
 dav-server = { version = "0.12.0", default-features = false }
 getrandom = "0.4.3"
+rust-embed = { version = "8.14.0", features = ["mime-guess"] }
 tower = { version = "0.5.3", features = ["util"] }
