@@ -1,6 +1,6 @@
-# MemVaultTree (`mem`) 完整使用说明手册
+# Engram (`mem`) 完整使用说明手册
 
-欢迎使用 **MemVaultTree (`mem`)** —— 基于单文件 SQLite CAS + Merkle Tree + Obsidian Wiki 图谱的**版本化 AI Agent 记忆引擎**。
+欢迎使用 **Engram (`mem`)** —— 基于单文件 SQLite CAS + Merkle Tree + Obsidian Wiki 图谱的**版本化 AI Agent 记忆引擎**。
 
 本手册涵盖从一行命令安装、交互式初始化、Obsidian Wiki 编写规范、Git 风格分支/回滚工作流、Ollama 与 OpenAI 一键切换，到 Coding Agent (MCP) 自动接入的全流程指引。
 
@@ -24,7 +24,7 @@
 无需提前安装 Docker、Postgres 或 Qdrant。打开终端执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh
 ```
 
 安装器会自动完成：
@@ -41,13 +41,13 @@ curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh 
 
 ```bash
 # 本地 Ollama 开发模式 + 写入演示 Wiki 笔记
-curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh | sh -s -- --mode ollama --seed-demo --yes
+curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh -s -- --mode ollama --seed-demo --yes
 
 # 直接导入你现有的 Obsidian 知识库
-curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh | sh -s -- --mode lite --vault ~/Documents/MyObsidianVault --yes
+curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh -s -- --mode lite --vault ~/Documents/MyObsidianVault --yes
 
 # 生产环境 OpenAI 模式
-curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh | sh -s -- --mode openai --api-key "sk-..." --yes
+curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh -s -- --mode openai --api-key "sk-..." --yes
 ```
 
 ### 1.3 三种运行档案（Intelligence Profiles）对比
@@ -261,4 +261,4 @@ mem mcp install --client claude-code
 3. **Q：生产环境连接 `https://api.openai.com/v1` 需要什么条件？**
    **A**：系统需安装 `curl`（Linux / macOS 默认自带，Docker 镜像已内置），并通过 `mem config use openai --api-key "sk-..."` 或环境变量 `OPENAI_API_KEY` 配置有效密钥。
 4. **Q：如何备份或迁移整个记忆库？**
-   **A**：MemVaultTree 采用单文件嵌入式架构，只需复制 `~/.ai-memory/memory.db`（建议先停止写入或用 SQLite `.backup` 命令）和 `~/.ai-memory/config.json` 即可完整迁移所有历史版本与图谱索引。
+   **A**：Engram 采用单文件嵌入式架构，只需复制 `~/.ai-memory/memory.db`（建议先停止写入或用 SQLite `.backup` 命令）和 `~/.ai-memory/config.json` 即可完整迁移所有历史版本与图谱索引。

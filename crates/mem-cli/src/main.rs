@@ -1436,7 +1436,7 @@ fn cmd_doctor(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
 
 fn print_help() {
     println!(
-        r#"mem {VERSION} — MemVaultTree: Versioned Structured Memory Engine for AI Agents
+        r#"mem {VERSION} — Engram: Versioned Structured Memory Engine for AI Agents
 
 USAGE:
   mem [GLOBAL OPTIONS] <COMMAND> [ARGS]

@@ -12,6 +12,11 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+authors = ["z23ng <z23ng@users.noreply.github.com>"]
+repository = "https://github.com/z23ng/engram"
+documentation = "https://github.com/z23ng/engram/blob/main/docs/USER_GUIDE.md"
+keywords = ["ai", "memory", "mcp", "sqlite", "merkle-tree"]
+categories = ["database-implementations", "command-line-utilities"]
 
 [workspace.dependencies]
 blake3 = "1.5"

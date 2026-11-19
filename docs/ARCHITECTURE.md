@@ -1,6 +1,6 @@
-# AI Memory (`mem`) 系统架构设计
+# Engram (`mem`) 系统架构设计
 
-本文档阐述 `ai-memory` 的系统分层架构、VFS 记忆命名空间、基于 SQLite 的 CAS 与 Merkle Tree 版本控制模型、分支感知混合检索引擎及核心操作时序。
+本文档阐述 **Engram (`mem`)** 的系统分层架构、VFS 记忆命名空间、基于 SQLite 的 CAS 与 Merkle Tree 版本控制模型、分支感知混合检索引擎及核心操作时序。
 
 ---
 

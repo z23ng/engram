@@ -1,8 +1,14 @@
 [package]
 name = "mem-vcs"
+description = "Git-like Merkle tree version control kernel (branch, commit, diff, rewind, 3-way merge, GC) for Engram"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 mem-core = { workspace = true }

@@ -1,8 +1,14 @@
 [package]
 name = "mem-store"
+description = "Embedded single-file SQLite WAL CAS, Merkle tree, FTS5, and Wiki graph storage for Engram"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 mem-core = { workspace = true }

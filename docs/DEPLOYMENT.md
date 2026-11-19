@@ -1,4 +1,4 @@
-# MemVaultTree (`mem`) 部署与运维指南
+# Engram (`mem`) 部署与运维指南
 
 本项目采用**单二进制 + 单文件嵌入式 SQLite** 架构，零外部数据库强依赖，支持从开发机平滑切换至生产服务器。
 
@@ -8,13 +8,13 @@
 
 ### 远程一键安装（自动下载预编译二进制 + 启动交互向导）
 ```bash
-curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh
 ```
 
 ### 从源码仓库安装与运行
 ```bash
-git clone https://github.com/z23ng/memvaulttree.git
-cd memvaulttree
+git clone https://github.com/z23ng/engram.git
+cd engram
 ./install.sh              # 启动交互式向导（含硬件/GPU/AI客户端探测）
 # 或使用 Make 快捷指令
 make demo                 # Lite 模式 + 写入 Obsidian Wiki 示例并验证

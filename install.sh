@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MemVaultTree (`mem`) — Modern One-Line Installer & Onboarding Launcher
+# Engram (`mem`) — Modern One-Line Installer & Onboarding Launcher
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/z23ng/memvaulttree/main/install.sh | sh -s -- --mode ollama --seed-demo
+#   curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh -s -- --mode ollama --seed-demo
 
-REPO="z23ng/memvaulttree"
+REPO="z23ng/engram"
 INSTALL_DIR="${MEM_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="latest"
 NO_INSTALL=false
@@ -39,7 +39,7 @@ fi
 
 usage() {
   cat <<'EOF'
-MemVaultTree (`mem`) — One-Line Installer & Interactive Onboarding
+Engram (`mem`) — One-Line Installer & Interactive Onboarding
 
 USAGE:
   install.sh [INSTALLER OPTIONS] [ONBOARD OPTIONS]
@@ -89,7 +89,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-printf "\n${C_CYAN}${C_BOLD}┌${C_RESET}  ${C_BOLD}MemVaultTree Installer${C_RESET} ${C_DIM}(github.com/${REPO})${C_RESET}\n"
+printf "\n${C_CYAN}${C_BOLD}┌${C_RESET}  ${C_BOLD}Engram Installer${C_RESET} ${C_DIM}(github.com/${REPO})${C_RESET}\n"
 printf "${C_CYAN}${C_BOLD}│${C_RESET}\n"
 
 detect_target() {
@@ -138,7 +138,7 @@ ensure_install_dir_in_shell() {
   for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     if [[ -f "$rc" ]]; then
       if ! grep -Fq "$dir" "$rc" 2>/dev/null; then
-        printf "\n# Added by MemVaultTree installer\n%s\n" "$line" >> "$rc"
+        printf "\n# Added by Engram installer\n%s\n" "$line" >> "$rc"
         updated="$rc"
       fi
     fi
@@ -178,8 +178,9 @@ if [[ -n "$LOCAL_REPO_ROOT" && ( "$NO_INSTALL" == "true" || "$FROM_SOURCE" == "t
     mkdir -p "$INSTALL_DIR"
     cp "$BUILT_BIN" "${INSTALL_DIR}/mem"
     chmod +x "${INSTALL_DIR}/mem"
+    ln -sf "${INSTALL_DIR}/mem" "${INSTALL_DIR}/engram"
     MEM_BIN="${INSTALL_DIR}/mem"
-    printf "${C_CYAN}${C_BOLD}│${C_RESET}  ├─ Installed: ${C_GREEN}%s${C_RESET}\n" "$MEM_BIN"
+    printf "${C_CYAN}${C_BOLD}│${C_RESET}  ├─ Installed: ${C_GREEN}%s${C_RESET} ${C_DIM}(alias: engram)${C_RESET}\n" "$MEM_BIN"
     ensure_install_dir_in_shell "$INSTALL_DIR"
   fi
 else
@@ -208,9 +209,10 @@ else
       mkdir -p "$INSTALL_DIR"
       mv "${TMP_DIR}/mem" "${INSTALL_DIR}/mem"
       chmod +x "${INSTALL_DIR}/mem"
+      ln -sf "${INSTALL_DIR}/mem" "${INSTALL_DIR}/engram"
       MEM_BIN="${INSTALL_DIR}/mem"
       DOWNLOADED=true
-      printf "${C_CYAN}${C_BOLD}│${C_RESET}  ├─ Installed: ${C_GREEN}%s${C_RESET}\n" "$MEM_BIN"
+      printf "${C_CYAN}${C_BOLD}│${C_RESET}  ├─ Installed: ${C_GREEN}%s${C_RESET} ${C_DIM}(alias: engram)${C_RESET}\n" "$MEM_BIN"
       ensure_install_dir_in_shell "$INSTALL_DIR"
     fi
   fi
@@ -229,8 +231,9 @@ else
     cargo install --locked --git "https://github.com/${REPO}.git" mem-cli --root "$CARGO_ROOT"
     mv "${CARGO_ROOT}/bin/mem" "${INSTALL_DIR}/mem"
     chmod +x "${INSTALL_DIR}/mem"
+    ln -sf "${INSTALL_DIR}/mem" "${INSTALL_DIR}/engram"
     MEM_BIN="${INSTALL_DIR}/mem"
-    printf "${C_CYAN}${C_BOLD}│${C_RESET}  ├─ Installed: ${C_GREEN}%s${C_RESET}\n" "$MEM_BIN"
+    printf "${C_CYAN}${C_BOLD}│${C_RESET}  ├─ Installed: ${C_GREEN}%s${C_RESET} ${C_DIM}(alias: engram)${C_RESET}\n" "$MEM_BIN"
     ensure_install_dir_in_shell "$INSTALL_DIR"
   fi
 fi

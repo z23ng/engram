@@ -1,4 +1,4 @@
-# AI Memory (`mem`) 目录结构与核心模块规划
+# Engram (`mem`) 目录结构与核心模块规划
 
 本项目采用 **Rust Cargo Workspace** 实现高性能、单文件嵌入式核心引擎，并预留 Python/TypeScript SDK 绑定与可选 FUSE 挂载能力。
 
@@ -7,32 +7,40 @@
 ## 1. Cargo Workspace 目录树
 
 ```text
-ai-memory/
-├── Cargo.toml                  # Workspace 定义、统一依赖与编译配置
+engram/
+├── Cargo.toml                  # Workspace 定义、统一依赖、包元数据与编译配置
 ├── Cargo.lock
 ├── rust-toolchain.toml         # 锁定 Rust 工具链版本
+├── rustfmt.toml                # 代码格式化规范
+├── install.sh                  # 一行远程安装入口 (curl | sh)
+├── Dockerfile                  # 多阶段容器构建
+├── docker-compose.yml          # 容器编排 (含可选 Ollama Profile)
+├── Makefile                    # 开发者常用构建/测试/演示目标
 ├── AGENTS.md                   # AI 开发会话协作指南
+├── CONTRIBUTING.md             # 贡献规范与架构不变量检查清单
+├── SECURITY.md                 # 安全保证与漏洞反馈策略
+├── CHANGELOG.md                # 版本变更日志
+├── LICENSE-MIT / LICENSE-APACHE
 ├── README.md
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── DIRECTORY_STRUCTURE.md
+│   ├── DEPLOYMENT.md
+│   ├── USER_GUIDE.md
 │   └── ROADMAP.md
+├── examples/
+│   ├── obsidian-vault/         # 示例 Obsidian 双链知识库
+│   └── multi_agent_branch_merge.sh
 ├── crates/
 │   ├── mem-core/               # 领域模型层：VirtualPath、MemoryNode、Tier、Commit、Branch、Diff、Error
-│   ├── mem-store/              # 存储底座：SQLite WAL 连接池、BLAKE3 CAS、zstd 压缩、Schema 迁移
+│   ├── mem-store/              # 存储底座：SQLite WAL、BLAKE3 CAS、zstd 压缩、FTS5/图谱 Schema
 │   ├── mem-vcs/                # 版本控制内核：Merkle Tree、Branch/Checkout、Commit、Diff、Rewind、3-Way Merge、GC
-│   ├── mem-search/             # 检索与编译层：FTS5 BM25、Vector 索引、分支感知 RRF 重排、/core 热编译
-│   ├── mem-consolidate/        # (可选冷路径) 后台异步记忆提炼、冲突消解与衰减归档接口
-│   ├── mem-daemon/             # HTTP / gRPC 独立记忆服务端（供跨进程与远程 Agent 调用）
-│   ├── mem-mcp/                # Model Context Protocol Server（暴露给 Claude Code / Cursor / Agents）
-│   ├── mem-cli/                # 命令行工具：mem init / status / write / read / commit / branch / rewind / diff / merge / search
+│   ├── mem-search/             # 检索与编译层：Obsidian Wiki 解析、FTS5 BM25、Vector 索引、Graph-RRF、/core 热编译
+│   ├── mem-cli/                # 统一二进制 `mem`：CLI、Clack 风格 `onboard` 向导、`config`、`doctor` 与 `mcp` Server
+│   ├── mem-consolidate/        # (冷路径规划) 后台异步记忆提炼、冲突消解与衰减归档接口
+│   ├── mem-daemon/             # (规划) HTTP / gRPC 独立记忆服务端
 │   └── mem-fuse/               # (Phase 4 可选) 类 LayerFS 的 POSIX FUSE 虚拟文件系统挂载适配器
-├── bindings/
-│   ├── python/                 # PyO3 原生 Python 绑定与异步客户端
-│   └── typescript/             # NAPI-RS 或 HTTP/MCP TypeScript SDK
-└── tests/
-    ├── integration/            # 端到端分支隔离、Rewind、三路合并、GC 正确性测试
-    └── benchmarks/             # 万级记忆节点检索延迟、Zero-copy Branch 耗时与数据库体积基准
+└── bindings/                   # (Phase 4 规划) Python / TypeScript 原生 SDK
 ```
 
 ---

@@ -439,7 +439,7 @@ pub fn cmd_config(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, String
                 );
             } else {
                 let c = opts.use_color;
-                println!("{} {}", paint(c, "36;1", "◆"), paint(c, "1", "Active MemVaultTree Configuration"));
+                println!("{} {}", paint(c, "36;1", "◆"), paint(c, "1", "Active Engram Configuration"));
                 println!("│  Config File : {} ({})", opts.config_path.display(), if saved.is_some() { "persisted" } else { "using defaults" });
                 println!("│  Vault DB    : {}", opts.db_path.display());
                 println!(
@@ -647,7 +647,7 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
         println!(
             "{}  {}",
             paint(c, "36;1", "┌"),
-            paint(c, "1", "MemVaultTree (`mem`) — Interactive Setup")
+            paint(c, "1", "Engram (`mem`) — Interactive Setup")
         );
         println!(
             "{}  {}",
@@ -968,7 +968,7 @@ pub fn cmd_onboard(opts: &GlobalOpts, args: &[String]) -> Result<ExitCode, Strin
         println!(
             "{}  {}",
             paint(c, "32;1", "└"),
-            paint(c, "32;1", "MemVaultTree is ready! No env sourcing needed — config is auto-loaded.")
+            paint(c, "32;1", "Engram is ready! No env sourcing needed — config is auto-loaded.")
         );
 
         println!();
