@@ -16,7 +16,7 @@ import {
   Search,
   Sun,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,12 +28,14 @@ import { cn } from "@/lib/utils";
 import { Audit } from "@/pages/Audit";
 import { Branches } from "@/pages/Branches";
 import { Changes } from "@/pages/Changes";
-import { Files } from "@/pages/Files";
 import { History } from "@/pages/History";
 import { Keys } from "@/pages/Keys";
 import { Projects } from "@/pages/Projects";
 import { SearchPage } from "@/pages/Search";
 import { Palette } from "./Palette";
+
+// CodeMirror and the Markdown renderer are most of the bundle; load them with the Files view.
+const Files = lazy(() => import("@/pages/Files").then((m) => ({ default: m.Files })));
 
 function NavItem({ icon, label, active, count, onClick }: {
   icon: ReactNode;
@@ -230,7 +232,9 @@ export function Shell() {
             </Button>
           ) : null}
         </header>
-        <main className="min-h-0 flex-1 overflow-auto">{page}</main>
+        <main className="min-h-0 flex-1 overflow-auto">
+          <Suspense fallback={<div className="p-6 text-xs text-muted-foreground">Loading editor...</div>}>{page}</Suspense>
+        </main>
       </div>
 
       <Palette open={palette} onOpenChange={setPalette} />
