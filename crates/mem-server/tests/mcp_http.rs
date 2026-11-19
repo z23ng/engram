@@ -197,3 +197,19 @@ async fn transport_rules_notification_get_and_parse_error() {
     let resp = f.app.clone().oneshot(get).await.unwrap();
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn unmapped_tools_and_unknown_methods_are_denied_by_default() {
+    let f = fixture();
+    let admin = key(&f, "admin", Role::Admin, &["alpha"]);
+    let unknown = call(&f, "alpha", &admin, "mem_future_tool", json!({})).await;
+    assert_eq!(unknown["isError"], true);
+    assert!(text(&unknown).contains("forbidden"), "{unknown}");
+
+    let other = rpc(&f, "alpha", &admin, "resources/list", json!({})).await;
+    assert_eq!(other["error"]["code"], -32601, "{other}");
+    for allowed in ["initialize", "ping"] {
+        let resp = rpc(&f, "alpha", &admin, allowed, json!({})).await;
+        assert!(resp["result"].is_object(), "{allowed}: {resp}");
+    }
+}

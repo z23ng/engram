@@ -52,20 +52,26 @@ pub(crate) async fn mcp(
             .as_str()
             .unwrap_or_default()
             .to_string();
-        let action = if method == "tools/call" {
-            tool_action(&tool)
-        } else {
-            None
+        // Deny by default: only mapped tools the role allows and an explicit method allowlist pass.
+        let action = match method.as_str() {
+            "tools/call" if allowed(&tool) => tool_action(&tool),
+            "tools/call" => {
+                let msg = format!(
+                    "forbidden: role '{}' may not call {tool}",
+                    key.role.as_str()
+                );
+                let resp = json!({"jsonrpc": "2.0", "id": id,
+                    "result": {"content": [{"type": "text", "text": msg}], "isError": true}});
+                return Ok(Json(resp).into_response());
+            }
+            "initialize" | "ping" => None,
+            m if m.starts_with("notifications/") => None,
+            other => {
+                let resp = json!({"jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32601, "message": format!("method not found: {other}")}});
+                return Ok(Json(resp).into_response());
+            }
         };
-        if action.is_some() && !allowed(&tool) {
-            let msg = format!(
-                "forbidden: role '{}' may not call {tool}",
-                key.role.as_str()
-            );
-            let resp = json!({"jsonrpc": "2.0", "id": id,
-                "result": {"content": [{"type": "text", "text": msg}], "isError": true}});
-            return Ok(Json(resp).into_response());
-        }
         if matches!(tool.as_str(), "mem_commit" | "mem_ingest") {
             set_author(&mut req, &key.name);
         }
@@ -93,5 +99,18 @@ fn set_author(req: &mut Value, name: &str) {
     let args = params.entry("arguments").or_insert_with(|| json!({}));
     if let Some(args) = args.as_object_mut() {
         args.insert("author".into(), json!(name));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_defined_tool_has_a_permission_mapping() {
+        for tool in mcp_tool_definitions() {
+            let name = tool["name"].as_str().unwrap_or_default();
+            assert!(tool_action(name).is_some(), "tool '{name}' has no Action");
+        }
     }
 }

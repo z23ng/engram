@@ -62,7 +62,7 @@ The local single-file `mem` CLI keeps working without changes (AGENTS.md invaria
 MCP endpoint behavior (S2):
 
 - Key check (401) and project scope (403) run before the body is parsed. Malformed JSON returns HTTP 400 with JSON-RPC error `-32700`. Notifications return 202 with an empty body. `GET` returns 405.
-- Tool permissions: Read = `mem_read`, `mem_list`, `mem_search`, `mem_compile_core`, `mem_diff`; Write = `mem_write`, `mem_commit`, `mem_ingest`; Branch = `mem_branch`, `mem_rewind`, `mem_merge`. A denied `tools/call` returns `result.isError = true` with a `forbidden` message and does not reach the engine.
+- Tool permissions: Read = `mem_read`, `mem_list`, `mem_search`, `mem_compile_core`, `mem_diff`; Write = `mem_write`, `mem_commit`, `mem_ingest`; Branch = `mem_branch`, `mem_rewind`, `mem_merge`. A denied `tools/call` returns `result.isError = true` with a `forbidden` message and does not reach the engine. Deny by default: a tool without a mapping is denied for every role, and only the methods `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/*` are accepted (others get `-32601`). A unit test checks that every tool in `mcp_tool_definitions()` has a mapping.
 - The server overwrites `author` in `mem_commit` / `mem_ingest` with the key name.
 - Audit rows: operation = tool name for successful Write/Branch tool calls, `rest.write` for REST writes; `commit_id` is taken from the tool result when present. `mem admin audit --project <slug> [--limit N]` lists them, newest first.
 

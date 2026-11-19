@@ -14,3 +14,15 @@
 3. Do not retry the same cargo network command more than once without a changed hypothesis.
 ### Relations
 - Cargo.toml (workspace.dependencies), crates/mem-server/Cargo.toml
+
+## [Rust][Fail-Open-Gate][mem-server-mcp] 2026-11-19 MCP permission gate forwarded unmapped tools and unknown methods
+### Failure Mode
+- `crates/mem-server/src/mcp.rs` computed `action = tool_action(&tool)` and checked the role only when `action.is_some()`; unmapped tool names and non-tool methods were forwarded to `handle_jsonrpc_request`.
+- Automated security review flagged it (MEDIUM, fail-open authorization). Reproduced with an admin `tools/call mem_future_tool`: response was `unknown tool: mem_future_tool` from the dispatcher instead of a server-side `forbidden`.
+- Not exploitable at that commit (all 11 dispatcher tools were mapped), but any new tool added to `mem-mcp` without a mapping would have been callable by a `bot` key.
+### Rules
+1. Authorization gates deny by default: unknown resource / tool / method -> reject before reaching the handler.
+2. Accept only an explicit method allowlist at the transport boundary (`initialize`, `ping`, `tools/list`, `tools/call`, `notifications/*`).
+3. Keep a unit test that every entry of `mcp_tool_definitions()` has a `tool_action` mapping.
+### Relations
+- crates/mem-server/src/mcp.rs, crates/mem-server/tests/mcp_http.rs
