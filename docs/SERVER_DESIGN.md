@@ -146,7 +146,8 @@ Input:
 - Source revision: the head commit of `main` when the run starts. Staged changes and other branches are never read.
 - Source files: `/episodic/**/*.md` files added or changed since the `source_commit` of the last successful run (all of `/episodic/` on the first run). No new episodic changes -> the run ends as `skipped` and makes no branch.
 - Context per source file: the top 3 search hits for its title in `/semantic/` and `/procedural/` on the same revision (deterministic search, no extra LLM call), with full content.
-- Batches: at most 8 source files and 48,000 characters of prompt text per LLM call, so a 7B local model fits.
+- Batches: at most 8 source files and 48,000 bytes of prompt text (headers included) per LLM call, about 15k tokens for CJK text. An episodic file larger than 23,000 bytes is sent in parts (`<path> (part i/n)`), split at line ends. A related note larger than 8,000 bytes is left out of the context, because the LLM may rewrite a context note in full and must never see a truncated copy.
+- Ollama must run with a context window that holds a batch: start it with `OLLAMA_CONTEXT_LENGTH=32768` (the default of 4096 tokens truncates the prompt; the model then loops and Ollama aborts with `token repeat limit reached`).
 
 LLM call (reuses `ConsolidateLlmConfig` and the OpenAI-compatible `chat/completions` client of `ingest.rs`; temperature 0.1):
 

@@ -58,3 +58,15 @@
    3. Confirm with `ollama list` and one real `/api/embed` or chat call.
 3. Relations
    - Session script: scratchpad `ollama_fetch.py` (not in the repo).
+
+## [Ollama][context-truncation][consolidate] 2026-11-20 Default 4096-token context truncated a 35,882-token prompt and the model looped
+1. Failure Mode
+   - First real S6 run on kepay-v1 failed after 24 s: `HTTP 500: {"error":{"message":"prediction aborted, token repeat limit reached"}}`, reported as "embedding endpoint returned HTTP 500" (wording of the shared HTTP helper).
+   - Ollama log: `msg="truncating input prompt" limit=2050 prompt=35882 keep=4 new=2050`. `tasks/todo.md` (one large episodic file) was sent whole, beyond the batch budget, and the server context was the default (`OLLAMA_CONTEXT_LENGTH:0` -> 4096).
+2. Rules
+   1. Budget LLM prompts in bytes including headers, and split large inputs; never send a single input above the budget.
+   2. Never send a truncated copy of a note the LLM may rewrite in full.
+   3. Start Ollama with `OLLAMA_CONTEXT_LENGTH=32768` for consolidation with qwen2.5:7b; check the log for `truncating input prompt` after the first run.
+   4. Find the failing call in the Ollama `[GIN]` lines (endpoint and status) before trusting an error message from a shared helper.
+3. Relations
+   - `crates/mem-search/src/consolidate.rs`, `crates/mem-search/tests/consolidate.rs`

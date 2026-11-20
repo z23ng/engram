@@ -248,3 +248,64 @@ fn unparsable_output_fails_and_identical_output_is_no_changes() {
     );
     assert!(e.vcs().head_commit("consolidate/same").is_err());
 }
+
+/// Prompt text a mock request carried (system + user content).
+fn user_text(body: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    v["messages"][1]["content"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_large_episodic_file_is_split_and_large_context_notes_are_not_sent() {
+    let (_d, e) = repo();
+    let mut log = String::from("# Payout journal\n\nSTART-MARKER\n");
+    while log.len() < 60_000 {
+        log.push_str("payout to wingpay retried after timeout; settled next cycle.\n");
+    }
+    log.push_str("END-MARKER\n");
+    write(&e, "/episodic/journal.md", &log);
+    write(
+        &e,
+        "/semantic/payout-big.md",
+        &format!(
+            "# Payout journal\n\nBIG-NOTE\n{}",
+            "payout settlement rules. ".repeat(400)
+        ),
+    );
+    e.vcs().commit("main", "t", "seed").unwrap();
+    let (url, seen) = mock_llm(&notes(&[("/procedural/payout.md", "# Payout\n\nretry")]));
+
+    let out = consolidate(&e, &llm(&url), None, "consolidate/big").unwrap();
+    assert_eq!(
+        (out.status, out.files_in),
+        (ConsolidateStatus::Succeeded, 1)
+    );
+    let prompts: Vec<String> = seen.lock().unwrap().iter().map(|b| user_text(b)).collect();
+    assert!(
+        prompts.len() >= 2,
+        "a 60 kB source cannot fit one 48 kB prompt: {}",
+        prompts.len()
+    );
+    assert!(
+        prompts.iter().all(|p| p.len() <= 48_000),
+        "{:?}",
+        prompts.iter().map(String::len).collect::<Vec<_>>()
+    );
+    let all = prompts.join("\n");
+    assert!(
+        all.contains("START-MARKER") && all.contains("END-MARKER"),
+        "every part is sent"
+    );
+    assert!(
+        !all.contains("BIG-NOTE"),
+        "context notes over 8 kB are never sent truncated"
+    );
+}
+
+#[test]
+fn llm_errors_name_the_consolidation_llm() {
+    let (_d, e) = repo();
+    seed(&e);
+    let err = consolidate(&e, &llm("http://127.0.0.1:9/v1"), None, "consolidate/x").unwrap_err();
+    assert!(err.to_string().contains("consolidation LLM"), "{err}");
+}

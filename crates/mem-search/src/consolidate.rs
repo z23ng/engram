@@ -15,7 +15,16 @@ use crate::embedder::post_json_http_or_curl;
 use crate::hybrid::{MemSearchEngine, SearchRequest};
 
 const MAX_FILES_PER_BATCH: usize = 8;
+/// Prompt budget in UTF-8 bytes (~15k tokens for CJK text): one source part plus 3 context notes.
 const MAX_PROMPT_CHARS: usize = 48_000;
+/// The two section titles of the user prompt.
+const PROMPT_SECTIONS_BYTES: usize = 64;
+/// Larger episodic files are sent in parts of at most this many bytes; one part plus 3 full
+/// context notes and headers stays under `MAX_PROMPT_CHARS`.
+const SOURCE_PART_BYTES: usize = 23_000;
+/// Larger related notes are left out: the LLM may rewrite a context note in full, so it must
+/// never see a truncated copy.
+const CONTEXT_NOTE_BYTES: usize = 8_000;
 const MAX_NOTE_BYTES: usize = 256 * 1024;
 const CONTEXT_NOTES: usize = 3;
 /// A local 7B model can need minutes for a full batch.
@@ -71,14 +80,23 @@ pub fn note_is_valid(path: &str, content: &str) -> bool {
 }
 
 struct Source {
-    path: VirtualPath,
+    /// Path, plus `(part i/n)` for a split file.
+    label: String,
     text: String,
     context: Vec<(VirtualPath, String)>,
 }
 
 impl Source {
+    /// Prompt bytes of this source and its context, including the `### <label>` headers.
     fn chars(&self) -> usize {
-        self.text.len() + self.context.iter().map(|(_, t)| t.len()).sum::<usize>()
+        let header = |label: &str| label.len() + 8;
+        header(&self.label)
+            + self.text.len()
+            + self
+                .context
+                .iter()
+                .map(|(p, t)| header(p.as_str()) + t.len())
+                .sum::<usize>()
     }
 }
 
@@ -122,7 +140,37 @@ fn read_text(
 }
 
 /// Loads a source file and its top related semantic/procedural notes (search, no LLM).
-fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> Result<Source> {
+/// Splits `text` at line ends into parts of at most `max` bytes (a longer line is cut at a
+/// char boundary).
+fn split_parts(text: &str, max: usize) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    for line in text.split_inclusive('\n') {
+        let mut rest = line;
+        while !rest.is_empty() {
+            let last = parts.last_mut().expect("parts is never empty");
+            let room = max - last.len();
+            if rest.len() <= room {
+                last.push_str(rest);
+                break;
+            }
+            if !last.is_empty() && rest.len() <= max {
+                parts.push(String::new());
+                continue;
+            }
+            let mut cut = room;
+            while !rest.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            last.push_str(&rest[..cut]);
+            rest = &rest[cut..];
+            parts.push(String::new());
+        }
+    }
+    parts.retain(|p| !p.is_empty());
+    parts
+}
+
+fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> Result<Vec<Source>> {
     let text = read_text(engine, rev, &path)?.unwrap_or_default();
     let title = text
         .lines()
@@ -141,17 +189,28 @@ fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> R
             continue;
         }
         if let Some(body) = read_text(engine, rev, &hit.path)? {
-            context.push((hit.path, body));
+            if body.len() <= CONTEXT_NOTE_BYTES {
+                context.push((hit.path, body));
+            }
         }
         if context.len() == CONTEXT_NOTES {
             break;
         }
     }
-    Ok(Source {
-        path,
-        text,
-        context,
-    })
+    let parts = split_parts(&text, SOURCE_PART_BYTES);
+    let n = parts.len();
+    Ok(parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| Source {
+            label: match n {
+                1 => path.as_str().to_string(),
+                _ => format!("{} (part {}/{n})", path.as_str(), i + 1),
+            },
+            text,
+            context: context.clone(),
+        })
+        .collect())
 }
 
 /// Greedy batches of at most 8 sources and 48,000 characters (a larger single source runs alone).
@@ -160,7 +219,8 @@ fn batches(sources: Vec<Source>) -> Vec<Vec<Source>> {
     let mut chars = 0;
     for s in sources {
         let fits = out.last().is_some_and(|b| {
-            b.len() < MAX_FILES_PER_BATCH && chars + s.chars() <= MAX_PROMPT_CHARS
+            b.len() < MAX_FILES_PER_BATCH
+                && chars + s.chars() <= MAX_PROMPT_CHARS - PROMPT_SECTIONS_BYTES
         });
         if !fits {
             out.push(Vec::new());
@@ -195,7 +255,7 @@ struct ReplyNote {
 fn user_prompt(batch: &[Source]) -> String {
     let mut out = String::from("## Episodic notes\n");
     for s in batch {
-        out.push_str(&format!("\n### {}\n{}\n", s.path.as_str(), s.text));
+        out.push_str(&format!("\n### {}\n{}\n", s.label, s.text));
     }
     out.push_str("\n## Related existing notes\n");
     let mut shown: Vec<&VirtualPath> = Vec::new();
@@ -225,7 +285,8 @@ fn ask_llm(cfg: &ConsolidateLlmConfig, batch: &[Source]) -> Result<Vec<ReplyNote
         cfg.api_key.as_deref(),
         &body.to_string(),
         LLM_TIMEOUT,
-    )?;
+    )
+    .map_err(|e| MemError::Storage(format!("consolidation LLM call failed: {e}")))?;
     let resp: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| MemError::Serialization(format!("consolidation LLM response: {e}")))?;
     let content = resp
@@ -285,7 +346,10 @@ pub fn consolidate(
     let sources = paths
         .into_iter()
         .map(|p| load_source(engine, &rev, p))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let mut notes: BTreeMap<VirtualPath, String> = BTreeMap::new();
     for batch in batches(sources) {
         for note in ask_llm(cfg, &batch)? {
