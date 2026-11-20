@@ -11,6 +11,7 @@ import { Table, TD, TH, THead, TR } from "@/components/ui/table";
 import type { MergeResult } from "@/lib/api";
 import { can, errorText, useApp } from "@/lib/app";
 import { shortId } from "@/lib/utils";
+import { ConsolidationPanel } from "./Consolidation";
 
 export function Branches() {
   const { client, me, route, go } = useApp();
@@ -79,6 +80,7 @@ export function Branches() {
                   {b.name}
                   {b.name === "main" ? <Badge tone="accent">default</Badge> : null}
                   {b.name === route.branch ? <Badge>current</Badge> : null}
+                  {b.name.startsWith("consolidate/") ? <Badge tone="warning">LLM</Badge> : null}
                 </span>
               </TD>
               <TD className="font-mono text-xs text-muted-foreground">{shortId(b.head)}</TD>
@@ -97,6 +99,8 @@ export function Branches() {
           ))}
         </tbody>
       </Table>
+
+      {can(me).manage ? <ConsolidationPanel /> : null}
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent title="New branch" description={`Starts at the head of ${route.branch}.`}>

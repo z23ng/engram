@@ -221,4 +221,91 @@ fn serve_logs_the_search_mode_of_each_project() {
         "{err}"
     );
     assert!(err.contains("unreachable"), "{err}");
+    assert!(err.contains("consolidation LLM: ollama "), "{err}");
+}
+
+/// Mock chat endpoint returning one procedural note for every request.
+fn mock_llm() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; len]).unwrap();
+            let notes = serde_json::json!({"notes": [{"path": "/procedural/retry.md", "content": "# Retry\n\ntwice"}]});
+            let resp =
+                serde_json::json!({"choices": [{"message": {"content": notes.to_string()}}]})
+                    .to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                resp.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn admin_consolidate_and_schedule() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let db = format!("{data}/projects/alpha.db");
+    assert!(
+        mem(&[
+            "--db",
+            &db,
+            "write",
+            "/episodic/a.md",
+            "# Payout retry\n\nretry twice"
+        ])
+        .0
+    );
+    assert!(mem(&["--db", &db, "commit", "-m", "log"]).0);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_mem"))
+        .args([
+            "--provider",
+            "ollama",
+            "admin",
+            "consolidate",
+            "--project",
+            "alpha",
+            "--data",
+            data,
+        ])
+        .env("MEM_LLM_BASE_URL", mock_llm())
+        .env("MEM_LLM_MODEL", "test-llm")
+        .env("MEM_EMBEDDING_BASE_URL", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("consolidate alpha: succeeded") && text.contains("branch consolidate/"),
+        "{text}"
+    );
+
+    assert!(mem(&["admin", "project", "schedule", "alpha", "--every", "24", "--data", data]).0);
+    assert!(mem(&["admin", "project", "schedule", "alpha", "--every", "off", "--data", data]).0);
+    assert!(!mem(&["admin", "project", "schedule", "alpha", "--every", "0", "--data", data]).0);
+    assert!(
+        !mem(&["admin", "consolidate", "--data", data]).0,
+        "--project is required"
+    );
 }

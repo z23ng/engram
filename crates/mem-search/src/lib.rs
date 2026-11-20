@@ -2,6 +2,7 @@
 
 pub mod compiler;
 pub mod config;
+pub mod consolidate;
 pub mod embedder;
 pub mod hybrid;
 pub mod ingest;
@@ -12,6 +13,7 @@ pub use compiler::{compile_core, estimate_tokens, CompiledCoreContext};
 pub use config::{
     ConsolidateLlmConfig, EmbeddingProviderConfig, MemConfig, ProviderBackend, SearchConfig,
 };
+pub use consolidate::{consolidate, note_is_valid, ConsolidateOutcome, ConsolidateStatus};
 pub use embedder::{
     cosine_similarity, cosine_similarity_le_bytes, decode_f32_vec, encode_f32_vec,
     DeterministicHashEmbedder, EmbeddingProvider, HttpPostTransport, NoopEmbedder,

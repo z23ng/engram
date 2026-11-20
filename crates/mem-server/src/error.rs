@@ -13,6 +13,7 @@ pub enum ServerError {
     Forbidden(String),
     NotFound(String),
     BadRequest(String),
+    Conflict(String),
     Internal(String),
 }
 
@@ -20,9 +21,11 @@ impl fmt::Display for ServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unauthorized => f.write_str("missing, unknown, revoked, or expired API key"),
-            Self::Forbidden(m) | Self::NotFound(m) | Self::BadRequest(m) | Self::Internal(m) => {
-                f.write_str(m)
-            }
+            Self::Forbidden(m)
+            | Self::NotFound(m)
+            | Self::BadRequest(m)
+            | Self::Conflict(m)
+            | Self::Internal(m) => f.write_str(m),
         }
     }
 }
@@ -57,6 +60,7 @@ impl IntoResponse for ServerError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()

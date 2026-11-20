@@ -13,6 +13,6 @@ Design: docs/SERVER_DESIGN.md. Worktree: ../ai-memory.worktree/feat-mem-server.
 - [x] Search index rebuild: per-blob embedding model tracking, `reindex_all`, `POST .../reindex` (admin), `mem admin reindex`, Search view button
 - [x] Search mode visibility: per-project stderr log line, `GET .../index`, Search view badge
 - [ ] Enable embeddings for the local kepay-v1 trial (needs Ollama + bge-m3 or an OpenAI key from TL)
-- [ ] S6 background consolidation (scheduled LLM consolidation into a review branch); design first
+- [x] S6 background consolidation: review branches `consolidate/*`, manual + schedule triggers, runs table, console panel
 - [ ] S5 Dockerfile (non-root, distroless), docs sync, ROADMAP 3.4
 - [ ] Gate: eval_trace.py --gate, /run-verify, push branch, open MR

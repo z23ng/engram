@@ -14,7 +14,8 @@ type CmdResult = Result<ExitCode, String>;
 
 const ADMIN_USAGE: &str = "usage: mem admin --data <dir> (project create <slug> | project list | \
 key create --name <n> --role admin|dev|pm|bot [--projects a,b] [--expires-days N] | key list | key revoke <id> | \
-audit --project <slug> [--limit N] | reindex --project <slug>)";
+audit --project <slug> [--limit N] | reindex --project <slug> | consolidate --project <slug> | \
+project schedule <slug> --every <hours|off>)";
 
 /// Removes `flag value` from `args` and returns the value.
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, String> {
@@ -49,7 +50,10 @@ pub fn cmd_serve(opts: &GlobalOpts, args: &[String]) -> CmdResult {
         engine
     });
     let (cp, _) = open_control(&mut args, factory)?;
-    let cp = cp.with_llm_config(opts.consolidate_config());
+    let llm = opts.consolidate_config();
+    let backend = format!("{:?}", llm.backend).to_lowercase();
+    eprintln!("consolidation LLM: {backend} {}", llm.model);
+    let cp = cp.with_llm_config(llm);
     if let Some(extra) = args.first() {
         return Err(format!("unexpected serve argument '{extra}'"));
     }
@@ -78,12 +82,14 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     let emb_cfg = opts.embedding_config();
     let factory: EngineFactory = Box::new(move |vcs: MemVcs| build_search_engine(vcs, &emb_cfg).0);
     let (cp, _) = open_control(&mut args, factory)?;
+    let cp = cp.with_llm_config(opts.consolidate_config());
     let name = take_flag(&mut args, "--name")?;
     let role = take_flag(&mut args, "--role")?;
     let projects = take_flag(&mut args, "--projects")?;
     let expires_days = take_flag(&mut args, "--expires-days")?;
     let project = take_flag(&mut args, "--project")?;
     let limit = take_flag(&mut args, "--limit")?;
+    let every = take_flag(&mut args, "--every")?;
     let err = |e: mem_server::ServerError| e.to_string();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -145,6 +151,34 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
                 return Err(format!("key {id} does not exist or is already revoked"));
             }
             println!("revoked key {id}");
+        }
+        ["project", "schedule", slug] => {
+            let every_hours = match every.as_deref().ok_or("--every <hours|off> is required")? {
+                "off" => None,
+                n => Some(
+                    n.parse::<u32>()
+                        .map_err(|_| "--every must be hours or off")?,
+                ),
+            };
+            cp.set_consolidate_schedule(slug, every_hours)
+                .map_err(err)?;
+            let shown = every_hours.map_or_else(|| "off".to_string(), |h| format!("every {h} h"));
+            println!("consolidation schedule {slug}: {shown}");
+        }
+        ["consolidate"] => {
+            let project = project.ok_or("--project is required")?;
+            let run = cp.consolidate_now(&project, "cli:admin").map_err(err)?;
+            println!(
+                "consolidate {project}: {} branch {} files {} notes {} dropped {}",
+                run.status,
+                run.branch.as_deref().unwrap_or("-"),
+                run.files_in,
+                run.notes_written,
+                run.notes_dropped
+            );
+            if let Some(e) = run.error {
+                return Err(format!("consolidate {project}: failed: {e}"));
+            }
         }
         ["reindex"] => {
             let project = project.ok_or("--project is required")?;

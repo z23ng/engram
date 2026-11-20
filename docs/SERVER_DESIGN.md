@@ -168,6 +168,15 @@ Triggers:
 - Schedule: `projects.consolidate_every_hours` (NULL = off, default). Set with `PUT .../consolidate/schedule {"every_hours": N|null}` (Manage) or `mem admin project schedule <slug> --every <hours|off>`. `mem serve` runs one tokio task that wakes every 60 s and starts a `schedule` run for each project whose last finished run (any status) is at least `every_hours` old.
 - Console: on Branches, admin keys see "Consolidate now", the schedule selector (off / 6 h / 24 h / 7 d), and the last 10 runs with status, branch link, and error. `consolidate/*` branches carry an "LLM" badge.
 
+Implementation notes (S6 as built):
+
+- A `no_changes` run never creates the branch (same result as creating and removing it).
+- When `consolidate/<UTC yyyymmdd-HHMM>` already exists (two runs in one minute), the branch gets the suffix `-<run_id>`.
+- "Last successful run" = the newest run with status `succeeded`, `no_changes`, or `skipped`; each of them consumed the episodic files up to its `source_commit`.
+- `GET .../consolidate/runs` also returns `every_hours`, so the console needs one call. Schedule changes are audited as `consolidate.schedule`; every finished run (also `skipped` and `no_changes`) is audited as `consolidate.run`.
+- Each LLM call has a 600 s timeout and asks for `response_format: json_object`; the reply may wrap the JSON in a fence or prose.
+- The one-run guard is per process: `mem admin consolidate` and a running `mem serve` do not see each other's runs. A run interrupted by a server stop stays `running` in the table.
+
 Privacy: with the OpenAI backend, episodic and context note text leaves the machine. `mem serve` logs the LLM backend and model at startup.
 
 Tests (mock LLM on a local `TcpListener`, as in `ingest.rs`): path validation table (core, episodic, `..`, non-md, attachments, oversize); a manual run writes the expected notes on a `consolidate/*` branch with author `consolidator:<model>` and leaves `main` unchanged; a second run with no new episodic changes is `skipped`; an unreachable LLM gives `failed` and no branch; output identical to existing notes gives `no_changes`; a concurrent trigger gets 409; dev and bot keys get 403; the schedule picks only due projects (injected clock); CLI command prints the run result; the UI shows the button only for admin and lists runs.

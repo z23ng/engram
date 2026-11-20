@@ -3,6 +3,21 @@
 export type Role = "admin" | "dev" | "pm" | "bot";
 export type Me = { name: string; role: Role; projects: string[] | null };
 export type Branch = { name: string; head: string; changes: number };
+export type ConsolidationRun = {
+  id: number;
+  project: string;
+  trigger: "manual" | "schedule";
+  requested_by: string;
+  status: "running" | "succeeded" | "no_changes" | "skipped" | "failed";
+  source_commit: string | null;
+  branch: string | null;
+  files_in: number;
+  notes_written: number;
+  notes_dropped: number;
+  error: string | null;
+  started_at_ms: number;
+  finished_at_ms: number | null;
+};
 export type FileEntry = { path: string; blob_id: string; content_type: string; updated_at_ms: number };
 export type Commit = {
   commit_id: string;
@@ -120,6 +135,11 @@ export function createClient(getKey: () => string | null, onUnauthorized: () => 
       json<MergeResult>("POST", `${p(project)}/merge`, { json: { source, target }, accept: [409] }),
     indexInfo: (project: string) =>
       json<{ model: string; files: number; files_with_vectors: number; chunks: number }>("GET", `${p(project)}/index`),
+    consolidate: (project: string) => json<{ run_id: number }>("POST", `${p(project)}/consolidate`),
+    consolidationRuns: (project: string, limit = 10) =>
+      json<{ runs: ConsolidationRun[]; every_hours: number | null }>("GET", `${p(project)}/consolidate/runs`, { query: { limit } }),
+    setConsolidateSchedule: (project: string, every_hours: number | null) =>
+      json<{ every_hours: number | null }>("PUT", `${p(project)}/consolidate/schedule`, { json: { every_hours } }),
     reindex: (project: string) =>
       json<{ files_indexed: number; chunks: number; model: string }>("POST", `${p(project)}/reindex`),
   };

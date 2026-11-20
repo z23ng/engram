@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY, at INTEGER NOT NULL, key_id INTEGER, key_name TEXT, role TEXT,
     project TEXT, operation TEXT NOT NULL, commit_id TEXT);
+CREATE TABLE IF NOT EXISTS consolidation_runs (
+    id INTEGER PRIMARY KEY, project TEXT NOT NULL, trigger TEXT NOT NULL,
+    requested_by TEXT NOT NULL, status TEXT NOT NULL, source_commit TEXT, branch TEXT,
+    files_in INTEGER NOT NULL DEFAULT 0, notes_written INTEGER NOT NULL DEFAULT 0,
+    notes_dropped INTEGER NOT NULL DEFAULT 0, error TEXT, started_at_ms INTEGER NOT NULL,
+    finished_at_ms INTEGER);
 ";
 
 /// Control plane: `server.db` (projects, keys, audit) plus one engine file per project.
@@ -38,6 +44,8 @@ pub struct ControlPlane {
     pub(crate) dav_pending: Mutex<HashMap<(String, String), DavPending>>,
     /// Empty folders created by MKCOL (project, branch, path); process-local, not persisted.
     pub(crate) dav_dirs: Mutex<HashSet<(String, String, String)>>,
+    /// Projects with a consolidation run in progress in this process.
+    pub(crate) consolidating: Mutex<HashSet<String>>,
 }
 
 impl ControlPlane {
@@ -51,6 +59,7 @@ impl ControlPlane {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        crate::consolidate::migrate(&conn)?;
         let cp = Self {
             data_dir: data_dir.to_path_buf(),
             conn: Mutex::new(conn),
@@ -60,6 +69,7 @@ impl ControlPlane {
             dav_delay: Duration::from_secs(10),
             dav_pending: Mutex::new(HashMap::new()),
             dav_dirs: Mutex::new(HashSet::new()),
+            consolidating: Mutex::new(HashSet::new()),
         };
         Ok((cp, created))
     }
@@ -129,7 +139,7 @@ impl ControlPlane {
         Ok(engine)
     }
 
-    fn project_exists(&self, slug: &str) -> Result<bool, ServerError> {
+    pub(crate) fn project_exists(&self, slug: &str) -> Result<bool, ServerError> {
         let found = self
             .db()?
             .query_row("SELECT 1 FROM projects WHERE slug = ?1", [slug], |_| Ok(()))
