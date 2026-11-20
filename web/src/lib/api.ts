@@ -118,6 +118,8 @@ export function createClient(getKey: () => string | null, onUnauthorized: () => 
       json("POST", `${p(project)}/branches`, { json: { name, from } }),
     merge: (project: string, source: string, target: string) =>
       json<MergeResult>("POST", `${p(project)}/merge`, { json: { source, target }, accept: [409] }),
+    reindex: (project: string) =>
+      json<{ files_indexed: number; chunks: number; model: string }>("POST", `${p(project)}/reindex`),
   };
 }
 

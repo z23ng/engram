@@ -98,6 +98,12 @@ REST API behavior (S4a). All routes need `Authorization: Bearer <key>`. Project 
 | `PUT .../raw?path=&branch=` (body = bytes) | Write | images only, same rule as WebDAV attachments; 8 MiB -> 413; not indexed; audit `rest.upload` |
 | `POST .../branches` `{name, from?}` | Branch | 201; `~` is rejected (WebDAV uses it for `/`); audit `rest.branch` |
 | `POST .../merge` `{source, target?, strategy?}` | Branch | `{outcome: fast_forward\|merged, commit_id}`; conflict -> 409 `{conflicts}` and no change; audit `rest.merge`. A real merge commit has author = key name (MCP `mem_merge` also overrides `author`). |
+| `POST .../reindex` | Manage | Drops the project search index and indexes every branch view (head plus staged changes) again with the server's embedder: `{files_indexed, chunks, model}`; audit `rest.reindex`. `mem admin reindex --project <slug>` does the same from the CLI, and the Search view shows a "Rebuild index" button to admin keys. |
+
+Search index behavior:
+
+- Every write path (REST, WebDAV, MCP, CLI) indexes the new blob at once; each search first indexes any blob of the searched view that has no index rows. Index rows are keyed by `blob_id`, so branches and merges reuse them.
+- Table `blob_index_model(blob_id, model)` records which embedding model made a blob's vectors (`model_id`: `ollama:bge-m3`, `openai:text-embedding-3-small[:dims]`, or `disabled` for BM25 only). When the active model differs from the stored one, the next index pass drops that blob's chunk, full-text, and link rows and indexes it again, so enabling or changing a model re-embeds old files without a manual rebuild. With no model active (Ollama unreachable, or `disabled`), existing rows are kept, so an embedder outage never drops vectors.
 
 Web console behavior (S4b):
 
@@ -109,7 +115,7 @@ Web console behavior (S4b):
 - Files: tier tree, CodeMirror editor with Edit / Split / Preview, Ctrl/Cmd+S stages the file (`POST .../write`), Commit dialog commits all staged changes with author = key name. Pasting a png/jpg/gif/webp image uploads it to `<tier>/_attachments/<UTC stamp>-<name>.<ext>` (`semantic` for `core` documents) and inserts a relative Markdown link, which also works in Obsidian. The preview renders Markdown without raw HTML; vault images load through `GET .../raw` as `blob:` URLs, external images are not loaded.
 - The UI hides write actions for `bot` keys; the server still enforces every permission.
 
-CLI additions: `mem serve --data <dir> --listen <addr>`, `mem admin project create|list`, `mem admin key create|list|revoke`. First start on an empty data directory prints a one-time `admin` key.
+CLI additions: `mem serve --data <dir> --listen <addr>`, `mem admin project create|list`, `mem admin key create|list|revoke`, `mem admin reindex --project <slug>` (uses the same embedder settings as `mem serve`). First start on an empty data directory prints a one-time `admin` key.
 
 ## 6. Crate changes
 

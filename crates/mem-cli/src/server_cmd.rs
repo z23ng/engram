@@ -5,7 +5,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use chrono::Utc;
-use mem_search::MemSearchEngine;
 use mem_server::{ControlPlane, EngineFactory, Role};
 use mem_vcs::MemVcs;
 
@@ -15,7 +14,7 @@ type CmdResult = Result<ExitCode, String>;
 
 const ADMIN_USAGE: &str = "usage: mem admin --data <dir> (project create <slug> | project list | \
 key create --name <n> --role admin|dev|pm|bot [--projects a,b] [--expires-days N] | key list | key revoke <id> | \
-audit --project <slug> [--limit N])";
+audit --project <slug> [--limit N] | reindex --project <slug>)";
 
 /// Removes `flag value` from `args` and returns the value.
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, String> {
@@ -67,9 +66,12 @@ pub fn cmd_serve(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn cmd_admin(args: &[String]) -> CmdResult {
+pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     let mut args = args.to_vec();
-    let (cp, _) = open_control(&mut args, Box::new(MemSearchEngine::new_bm25_only))?;
+    // Same embedder as `mem serve`, so `reindex` produces the vectors the server searches with.
+    let emb_cfg = opts.embedding_config();
+    let factory: EngineFactory = Box::new(move |vcs: MemVcs| build_search_engine(vcs, &emb_cfg).0);
+    let (cp, _) = open_control(&mut args, factory)?;
     let name = take_flag(&mut args, "--name")?;
     let role = take_flag(&mut args, "--role")?;
     let projects = take_flag(&mut args, "--projects")?;
@@ -137,6 +139,17 @@ pub fn cmd_admin(args: &[String]) -> CmdResult {
                 return Err(format!("key {id} does not exist or is already revoked"));
             }
             println!("revoked key {id}");
+        }
+        ["reindex"] => {
+            let project = project.ok_or("--project is required")?;
+            let engine = cp.engine(&project).map_err(err)?;
+            let stats = engine.reindex_all().map_err(|e| e.to_string())?;
+            println!(
+                "reindexed {project}: {} file(s), {} chunk(s), model {}",
+                stats.blobs_newly_indexed,
+                stats.chunks_indexed,
+                engine.embedding_model()
+            );
         }
         ["audit"] => {
             let project = project.ok_or("--project is required")?;

@@ -1,12 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { RefreshCw, Search } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { Empty, PageHeader } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
-import { useApp } from "@/lib/app";
+import { can, errorText, useApp } from "@/lib/app";
 
 export function SearchPage() {
-  const { client, route, go } = useApp();
+  const { client, me, route, go } = useApp();
+  const queries = useQueryClient();
   const project = route.project!;
   const [input, setInput] = useState("");
   const [query, setQuery] = useState("");
@@ -15,9 +18,28 @@ export function SearchPage() {
     queryFn: () => client.search(project, route.branch, query),
     enabled: !!query,
   });
+  const reindex = useMutation({
+    mutationFn: () => client.reindex(project),
+    onSuccess: (r) => {
+      queries.invalidateQueries({ queryKey: ["search", project] });
+      toast.success("Index rebuilt", { description: `${r.files_indexed} file(s), ${r.chunks} chunk(s), model ${r.model}` });
+    },
+    onError: (e) => toast.error("Rebuild failed", { description: errorText(e) }),
+  });
   return (
     <div className="mx-auto max-w-4xl p-6">
-      <PageHeader title="Search" description={`Hybrid search over the ${route.branch} workspace (same results agents get through MCP).`} />
+      <PageHeader
+        title="Search"
+        description={`Hybrid search over the ${route.branch} workspace (same results agents get through MCP).`}
+        actions={
+          can(me).manage ? (
+            <Button variant="outline" size="sm" disabled={reindex.isPending} onClick={() => reindex.mutate()}>
+              <RefreshCw className={reindex.isPending ? "animate-spin" : undefined} />
+              Rebuild index
+            </Button>
+          ) : null
+        }
+      />
       <form
         className="relative mb-4"
         onSubmit={(e) => {

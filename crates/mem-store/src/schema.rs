@@ -95,6 +95,11 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
             PRIMARY KEY (source_blob_id, link_kind, source_entity, relation, target_ref)
         );
 
+        CREATE TABLE IF NOT EXISTS blob_index_model (
+            blob_id TEXT PRIMARY KEY REFERENCES blobs(blob_id) ON DELETE CASCADE,
+            model TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_trees_tree_id ON trees(tree_id);
         CREATE INDEX IF NOT EXISTS idx_workspace_entries_branch ON workspace_entries(branch);
         CREATE INDEX IF NOT EXISTS idx_blob_links_target ON blob_links(target_ref);

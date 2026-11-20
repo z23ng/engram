@@ -156,3 +156,21 @@ fn admin_audit_lists_rows_of_a_project() {
     ];
     assert!(!mem(&bad_limit).0);
 }
+
+#[test]
+fn admin_reindex_rebuilds_a_project_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let db = format!("{data}/projects/alpha.db");
+    let (ok, out) = mem(&["--db", &db, "write", "/semantic/a.md", "# A\n\nrouting"]);
+    assert!(ok, "{out}");
+    let (ok, out) = mem(&["admin", "reindex", "--project", "alpha", "--data", data]);
+    assert!(ok, "{out}");
+    assert!(out.contains("reindexed alpha: 1 file(s)"), "{out}");
+    assert!(!mem(&["admin", "reindex", "--project", "nope", "--data", data]).0);
+    assert!(
+        !mem(&["admin", "reindex", "--data", data]).0,
+        "--project is required"
+    );
+}

@@ -8,11 +8,12 @@ use std::sync::Arc;
 use mem_core::{BlobId, MemError, MemoryMetadata, Result, Revision, VirtualPath};
 use mem_store::cas::get_blob_conn;
 use mem_vcs::MemVcs;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler::{compile_core, CompiledCoreContext};
 use crate::config::{ConsolidateLlmConfig, SearchConfig};
+use crate::embedder::DISABLED_MODEL;
 use crate::embedder::{
     cosine_similarity_le_bytes, encode_f32_vec, EmbeddingProvider, NoopEmbedder,
 };
@@ -200,6 +201,7 @@ impl MemSearchEngine {
             embeddings: Option<Vec<Vec<f32>>>,
         }
 
+        let model = self.embedder.model_id();
         let mut missing_raw: Vec<(BlobId, VirtualPath, Vec<u8>)> = Vec::new();
         self.vcs.store().with_conn(|conn| {
             let mut exists_stmt = conn
@@ -210,7 +212,7 @@ impl MemSearchEngine {
                 let already_indexed = exists_stmt
                     .exists(params![blob_id.to_hex()])
                     .map_err(|e| MemError::Storage(format!("failed to check chunk_index: {e}")))?;
-                if already_indexed {
+                if already_indexed && index_is_fresh(conn, &blob_id.to_hex(), &model)? {
                     stats.blobs_cache_hit += 1;
                     continue;
                 }
@@ -306,7 +308,19 @@ impl MemSearchEngine {
                     .exists(params![hex])
                     .map_err(|e| MemError::Storage(format!("failed tx existence check: {e}")))?;
                 if already {
-                    continue;
+                    if index_is_fresh(tx, &hex, &model)? {
+                        continue;
+                    }
+                    // Vectors from another model: drop this blob's rows, then insert them again.
+                    for sql in [
+                        "DELETE FROM chunk_index WHERE blob_id = ?1",
+                        "DELETE FROM fts_chunks WHERE blob_id = ?1",
+                        "DELETE FROM blob_links WHERE source_blob_id = ?1",
+                    ] {
+                        tx.execute(sql, params![hex]).map_err(|e| {
+                            MemError::Storage(format!("failed to drop stale index rows: {e}"))
+                        })?;
+                    }
                 }
 
                 let aliases_joined = item.parsed.aliases.join(" | ");
@@ -407,6 +421,11 @@ impl MemSearchEngine {
                     stats.links_indexed += 1;
                 }
 
+                tx.execute(
+                    "INSERT OR REPLACE INTO blob_index_model (blob_id, model) VALUES (?1, ?2)",
+                    params![hex, model],
+                )
+                .map_err(|e| MemError::Storage(format!("failed to record index model: {e}")))?;
                 stats.blobs_newly_indexed += 1;
             }
 
@@ -414,6 +433,29 @@ impl MemSearchEngine {
         })?;
 
         Ok(stats)
+    }
+
+    /// `model_id` of the active embedder; [`DISABLED_MODEL`] means BM25-only search.
+    pub fn embedding_model(&self) -> String {
+        self.embedder.model_id()
+    }
+
+    /// Drops the whole search index, then indexes every branch view (head plus staged changes)
+    /// with the current embedder. Blobs only in older commits are indexed again on first search.
+    pub fn reindex_all(&self) -> Result<IndexingStats> {
+        self.vcs.store().with_tx(|tx| {
+            tx.execute_batch(
+                "DELETE FROM chunk_index; DELETE FROM fts_chunks; DELETE FROM blob_links;
+                 DELETE FROM blob_index_model;",
+            )
+            .map_err(|e| MemError::Storage(format!("failed to clear search index: {e}")))
+        })?;
+        let mut items = Vec::new();
+        for (branch, _) in self.vcs.store().list_refs()? {
+            let view = self.vcs.list(&Revision::BranchWorkspace(branch), None)?;
+            items.extend(view.into_iter().map(|(path, blob_id, _)| (path, blob_id)));
+        }
+        self.index_unique_blobs(&items)
     }
 
     /// Executes branch-scoped hybrid search: BM25 + Vector + 1-hop Wiki Graph RRF fusion.
@@ -1369,4 +1411,17 @@ fn resolve_wiki_target(
         return Some(found.clone());
     }
     None
+}
+
+/// An indexed blob is fresh when no model is active (keep whatever exists, so an embedder
+/// outage never drops vectors) or when its vectors were made by `model`.
+fn index_is_fresh(conn: &Connection, blob_hex: &str, model: &str) -> Result<bool> {
+    if model == DISABLED_MODEL {
+        return Ok(true);
+    }
+    let stored: Option<String> = conn
+        .prepare_cached("SELECT model FROM blob_index_model WHERE blob_id = ?1")
+        .and_then(|mut stmt| stmt.query_row(params![blob_hex], |r| r.get(0)).optional())
+        .map_err(|e| MemError::Storage(format!("failed to read index model: {e}")))?;
+    Ok(stored.as_deref() == Some(model))
 }

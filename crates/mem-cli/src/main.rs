@@ -203,7 +203,7 @@ fn run() -> std::result::Result<ExitCode, String> {
         "gc" => cmd_gc(&opts),
         "doctor" => cmd_doctor(&opts),
         "serve" => server_cmd::cmd_serve(&opts, args),
-        "admin" => server_cmd::cmd_admin(args),
+        "admin" => server_cmd::cmd_admin(&opts, args),
         "mcp" => match args.first().map(String::as_str) {
             Some("install") => wizard::cmd_mcp_install(&opts, &args[1..]),
             None | Some("serve") => {

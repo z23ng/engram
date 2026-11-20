@@ -13,9 +13,18 @@ use serde_json::json;
 use crate::config::{EmbeddingProviderConfig, ProviderBackend};
 
 /// Abstraction over local or remote text embedding providers.
+/// `model_id` of a provider that produces no vectors (BM25-only search).
+pub const DISABLED_MODEL: &str = "disabled";
+
 pub trait EmbeddingProvider: Send + Sync {
     /// Human-readable identifier for this provider.
     fn provider_name(&self) -> &str;
+
+    /// Identity of the vectors this provider produces (provider plus model). The index stores it
+    /// per blob and re-embeds a blob when it changes. [`DISABLED_MODEL`] means "no vectors".
+    fn model_id(&self) -> String {
+        self.provider_name().to_string()
+    }
 
     /// Embeds a batch of document chunks into unit-length or raw float32 vectors.
     ///
@@ -103,6 +112,10 @@ impl DeterministicHashEmbedder {
 impl EmbeddingProvider for DeterministicHashEmbedder {
     fn provider_name(&self) -> &str {
         "deterministic-hash"
+    }
+
+    fn model_id(&self) -> String {
+        format!("deterministic-hash:{}", self.dim)
     }
 
     fn embed_batch(&self, texts: &[String]) -> Result<Option<Vec<Vec<f32>>>> {
@@ -199,6 +212,14 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
             ProviderBackend::Disabled => "disabled",
             ProviderBackend::Ollama => "ollama",
             ProviderBackend::OpenAi => "openai",
+        }
+    }
+
+    fn model_id(&self) -> String {
+        match (self.config.backend, self.config.dimensions) {
+            (ProviderBackend::Disabled, _) => DISABLED_MODEL.to_string(),
+            (_, Some(d)) => format!("{}:{}:{d}", self.provider_name(), self.config.model),
+            (_, None) => format!("{}:{}", self.provider_name(), self.config.model),
         }
     }
 

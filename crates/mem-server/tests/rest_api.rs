@@ -743,3 +743,35 @@ async fn merge_commit_uses_the_key_name_as_author() {
     );
     assert_eq!(engine_vcs(&f).log("main", 1).unwrap()[0].author, "pm-alice");
 }
+
+#[tokio::test]
+async fn reindex_rebuilds_the_project_index_for_admins_only() {
+    let f = fixture();
+    let admin = key(&f, "admin", Role::Admin, Some(&["alpha"]));
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    rest_write(&f, &dev, "/semantic/a.md", "# A\n\nrouting", Some("a")).await;
+    rest_write(&f, &dev, "/semantic/b.md", "# B\n\nstaged", None).await;
+    let uri = "/api/v1/projects/alpha/reindex";
+    assert_eq!(
+        call(&f, "POST", uri, Some(&dev), None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, r) = call(&f, "POST", uri, Some(&admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(
+        (r["files_indexed"].as_u64(), r["model"].as_str()),
+        (Some(2), Some("disabled")),
+        "{r}"
+    );
+    assert!(r["chunks"].as_u64().unwrap() >= 2, "{r}");
+    let (_, hits) = call(
+        &f,
+        "GET",
+        "/api/v1/projects/alpha/search?q=routing",
+        Some(&dev),
+        None,
+    )
+    .await;
+    assert_eq!(hits["hits"][0]["path"], "/semantic/a.md");
+    assert_eq!(audit_ops(&f)[0], "rest.reindex");
+}

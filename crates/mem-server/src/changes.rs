@@ -1,4 +1,4 @@
-//! REST endpoints that change a project: commit, delete, image upload, branch, merge.
+//! REST endpoints that change a project: commit, delete, image upload, branch, merge, reindex.
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -22,6 +22,33 @@ pub(crate) fn routes() -> Router<Shared> {
         .route("/api/v1/projects/{project}/raw", upload_route)
         .route("/api/v1/projects/{project}/branches", post(create_branch))
         .route("/api/v1/projects/{project}/merge", post(merge))
+        .route("/api/v1/projects/{project}/reindex", post(reindex))
+}
+
+/// Rebuilds the project's search index with the server's current embedder (admin only).
+async fn reindex(
+    State(cp): State<Shared>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+) -> JsonResult {
+    let scope = project.clone();
+    guarded(
+        cp,
+        headers,
+        scope,
+        Action::Manage,
+        move |cp, key, engine| {
+            let stats = engine.reindex_all()?;
+            let model = engine.embedding_model();
+            cp.record_audit(key, &project, "rest.reindex", None)?;
+            Ok(Json(json!({
+                "files_indexed": stats.blobs_newly_indexed,
+                "chunks": stats.chunks_indexed,
+                "model": model,
+            })))
+        },
+    )
+    .await
 }
 
 type JsonResult = Result<Json<Value>, ServerError>;

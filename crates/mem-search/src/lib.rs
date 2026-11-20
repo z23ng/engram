@@ -15,7 +15,7 @@ pub use config::{
 pub use embedder::{
     cosine_similarity, cosine_similarity_le_bytes, decode_f32_vec, encode_f32_vec,
     DeterministicHashEmbedder, EmbeddingProvider, HttpPostTransport, NoopEmbedder,
-    OpenAiCompatibleEmbedder,
+    OpenAiCompatibleEmbedder, DISABLED_MODEL,
 };
 pub use hybrid::{IndexingStats, MemSearchEngine, SearchHit, SearchRequest};
 pub use ingest::{ingest_knowledge, IngestOutcome, IngestRequest, IngestRole};
