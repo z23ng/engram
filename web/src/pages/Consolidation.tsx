@@ -16,10 +16,10 @@ const SCHEDULES = [
 
 const TONE = { running: "accent", succeeded: "success", no_changes: "neutral", skipped: "neutral", failed: "danger" } as const;
 
-/** Polls every 2 s while a run started in the last hour is running. An older `running` row is
- * left over from a server restart and never finishes. */
-export function pollInterval(runs: ConsolidationRun[] | undefined, now = Date.now()): number | false {
-  return runs?.some((r) => r.status === "running" && now - r.started_at_ms < 3_600_000) ? 2000 : false;
+/** Polls every 2 s while a run is running. `mem serve` marks runs of a stopped server as failed
+ * at startup, so a `running` row always belongs to a live run. */
+export function pollInterval(runs: ConsolidationRun[] | undefined): number | false {
+  return runs?.some((r) => r.status === "running") ? 2000 : false;
 }
 
 /** Admin-only: start an LLM consolidation run, set the schedule, list recent runs (S6). */

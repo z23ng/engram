@@ -357,3 +357,38 @@ fn a_partial_consolidation_exits_zero_with_a_warning() {
         "{text}"
     );
 }
+
+#[test]
+fn a_schedule_without_a_consolidation_llm_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let (ok, text) = mem(&[
+        "--provider",
+        "disabled",
+        "admin",
+        "project",
+        "schedule",
+        "alpha",
+        "--every",
+        "24",
+        "--data",
+        data,
+    ]);
+    assert!(!ok && text.contains("no consolidation LLM"), "{text}");
+    assert!(
+        mem(&[
+            "--provider",
+            "disabled",
+            "admin",
+            "project",
+            "schedule",
+            "alpha",
+            "--every",
+            "off",
+            "--data",
+            data
+        ])
+        .0
+    );
+}

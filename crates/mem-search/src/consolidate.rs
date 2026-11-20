@@ -19,9 +19,16 @@ const MAX_FILES_PER_BATCH: usize = 8;
 const MAX_PROMPT_CHARS: usize = 48_000;
 /// The two section titles of the user prompt.
 const PROMPT_SECTIONS_BYTES: usize = 64;
-/// Larger episodic files are sent in parts of at most this many bytes; one part plus 3 full
-/// context notes and headers stays under `MAX_PROMPT_CHARS`.
+/// Larger episodic files are sent in parts of at most this many bytes; `load_source` keeps one
+/// part plus its context notes and headers within `MAX_PROMPT_CHARS`.
 const SOURCE_PART_BYTES: usize = 23_000;
+/// Longest label suffix: ` (part 999/999)`.
+const PART_SUFFIX_BYTES: usize = 16;
+
+/// Prompt bytes of a `\n### <label>\n` section header plus the trailing newline.
+fn header_bytes(label: &str) -> usize {
+    label.len() + 8
+}
 /// Larger related notes are left out: the LLM may rewrite a context note in full, so it must
 /// never see a truncated copy.
 const CONTEXT_NOTE_BYTES: usize = 8_000;
@@ -98,13 +105,12 @@ struct Source {
 impl Source {
     /// Prompt bytes of this source and its context, including the `### <label>` headers.
     fn chars(&self) -> usize {
-        let header = |label: &str| label.len() + 8;
-        header(&self.label)
+        header_bytes(&self.label)
             + self.text.len()
             + self
                 .context
                 .iter()
-                .map(|(p, t)| header(p.as_str()) + t.len())
+                .map(|(p, t)| header_bytes(p.as_str()) + t.len())
                 .sum::<usize>()
     }
 }
@@ -188,6 +194,10 @@ fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> R
         .unwrap_or_else(|| path.as_str().rsplit('/').next().unwrap_or_default())
         .to_string();
     let hits = engine.search(&SearchRequest::new(rev.clone(), title).with_top_k(10))?;
+    // Bytes left for context next to the largest part and its longest label (`(part n/n)`), so
+    // a batch of one source never exceeds MAX_PROMPT_CHARS, whatever the path lengths.
+    let mut room = (MAX_PROMPT_CHARS - PROMPT_SECTIONS_BYTES - SYSTEM_PROMPT.len())
+        .saturating_sub(SOURCE_PART_BYTES + header_bytes(path.as_str()) + PART_SUFFIX_BYTES);
     let mut context: Vec<(VirtualPath, String)> = Vec::new();
     for hit in hits {
         let related = matches!(
@@ -198,7 +208,9 @@ fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> R
             continue;
         }
         if let Some(body) = read_text(engine, rev, &hit.path)? {
-            if body.len() <= CONTEXT_NOTE_BYTES {
+            let need = header_bytes(hit.path.as_str()) + body.len();
+            if body.len() <= CONTEXT_NOTE_BYTES && need <= room {
+                room -= need;
                 context.push((hit.path, body));
             }
         }

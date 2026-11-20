@@ -213,7 +213,7 @@ fn embedding_requests_are_split_into_groups_of_at_most_128_chunks() {
 }
 
 #[test]
-fn a_search_re_embeds_at_most_32_stale_files_and_adopts_unrecorded_vectors() {
+fn a_search_re_embeds_at_most_32_stale_files_including_unrecorded_vectors() {
     let (_d, vcs) = repo();
     many_files(&vcs, 50);
     engine(&vcs, None)
@@ -231,18 +231,86 @@ fn a_search_re_embeds_at_most_32_stale_files_and_adopts_unrecorded_vectors() {
         .unwrap();
     assert_eq!(index_state(&vcs).1, 50, "the next search catches up");
 
-    // Vectors without a model record (databases older than blob_index_model) are adopted.
+    // Vectors without a model record (databases older than blob_index_model) can come from any
+    // model, so they are stale: re-embedded 32 per search, never adopted.
     vcs.store()
         .with_conn(|c| Ok(c.execute("DELETE FROM blob_index_model", []).unwrap()))
         .unwrap();
-    emb.calls.lock().unwrap().clear();
     hybrid
         .search(&SearchRequest::new(main_head(), "routing"))
         .unwrap();
+    assert_eq!(model_rows(&vcs), 32);
+}
+
+fn model_rows(vcs: &MemVcs) -> i64 {
+    vcs.store()
+        .with_conn(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM blob_index_model", [], |r| r.get(0))
+                    .unwrap(),
+            )
+        })
+        .unwrap()
+}
+
+#[test]
+fn deferred_stale_files_are_not_counted_as_cache_hits() {
+    let (_d, vcs) = repo();
+    many_files(&vcs, 40);
+    engine(&vcs, None)
+        .ensure_revision_indexed(&main_head(), None)
+        .unwrap();
+    let items: Vec<_> = vcs
+        .list(&main_head(), None)
+        .unwrap()
+        .into_iter()
+        .map(|(p, b, _)| (p, b))
+        .collect();
+    let hybrid = MemSearchEngine::new(vcs.clone(), counting(), SearchConfig::default());
+    let stats = hybrid.index_unique_blobs(&items).unwrap();
     assert_eq!(
-        emb.calls.lock().unwrap().len(),
-        1,
-        "only the query is embedded"
+        (stats.blobs_newly_indexed, stats.blobs_cache_hit),
+        (32, 0),
+        "{stats:?}"
+    );
+}
+
+/// Every text maps to e1 under model "a"; under model "b" a text with "zzq" maps to e1, any
+/// other text to e2.
+struct Fixed(&'static str);
+
+impl mem_search::EmbeddingProvider for Fixed {
+    fn provider_name(&self) -> &str {
+        self.0
+    }
+    fn model_id(&self) -> String {
+        format!("{}:2", self.0)
+    }
+    fn embed_batch(&self, texts: &[String]) -> mem_core::Result<Option<Vec<Vec<f32>>>> {
+        let e = |t: &String| match (self.0, t.contains("zzq")) {
+            ("a", _) | (_, true) => vec![1.0, 0.0],
+            _ => vec![0.0, 1.0],
+        };
+        Ok(Some(texts.iter().map(e).collect()))
+    }
+}
+
+#[test]
+fn vectors_of_another_model_are_never_scored() {
+    let (_d, vcs) = repo();
+    many_files(&vcs, 40);
+    let with = |m| MemSearchEngine::new(vcs.clone(), Arc::new(Fixed(m)), SearchConfig::default());
+    with("a")
+        .ensure_revision_indexed(&main_head(), None)
+        .unwrap();
+    // Model "b": one search re-embeds 32 files (vector e2); 8 keep model-"a" vectors (e1).
+    let hits = with("b")
+        .search(&SearchRequest::new(main_head(), "zzq").with_top_k(50))
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "stale model-a vectors matched: {:?}",
+        hits.len()
     );
 }
 

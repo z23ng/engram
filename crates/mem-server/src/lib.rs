@@ -34,6 +34,11 @@ pub fn run_server(cp: Arc<ControlPlane>, listen: &str) -> std::io::Result<()> {
         .block_on(async {
             let listener = tokio::net::TcpListener::bind(listen).await?;
             println!("listening on {}", listener.local_addr()?);
+            match cp.fail_interrupted_runs() {
+                Ok(0) => {}
+                Ok(n) => eprintln!("marked {n} interrupted consolidation run(s) as failed"),
+                Err(e) => eprintln!("failed to clear interrupted consolidation runs: {e}"),
+            }
             if cp.llm_config().backend != mem_search::ProviderBackend::Disabled {
                 tokio::spawn(consolidate::scheduler(cp.clone()));
             }

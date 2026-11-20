@@ -466,23 +466,58 @@ fn a_repeated_path_and_a_rewrite_of_an_unseen_note_are_dropped() {
 
 #[test]
 fn the_prompt_budget_includes_the_system_prompt() {
+    // 22,000 + 22,000 + 3,500 bytes of text fit 48,000 bytes only without the system prompt.
     let (_d, e) = repo();
-    let mut log = String::from("# Payout journal\n\n");
-    while log.len() < 23_000 {
-        log.push_str("payout journal entry.\n");
-    }
-    write(&e, "/episodic/journal.md", &log);
-    for i in 0..3 {
-        let mut note = format!("# Payout journal {i}\n\n");
-        while note.len() < 7_990 {
-            note.push_str("payout journal rule.\n");
-        }
-        write(&e, &format!("/semantic/payout-{i}.md"), &note);
+    for (name, len) in [("a", 22_000), ("b", 22_000), ("c", 3_500)] {
+        write(
+            &e,
+            &format!("/episodic/{name}.md"),
+            &sized(&format!("Journal {name}"), "entry", len),
+        );
     }
     e.vcs().commit("main", "t", "seed").unwrap();
     let (url, seen) = mock_llm(&notes(&[("/procedural/x.md", "# X\n\ny")]));
     consolidate(&e, &llm(&url), None, "consolidate/budget").unwrap();
-    for body in seen.lock().unwrap().iter() {
+    assert_request_sizes(&seen.lock().unwrap(), 2);
+}
+
+#[test]
+fn long_paths_never_push_a_request_over_the_budget() {
+    let (_d, e) = repo();
+    let long = "payout-journal-".repeat(8);
+    write(
+        &e,
+        &format!("/episodic/{long}.md"),
+        &sized("Payout journal", "payout journal entry", 23_000),
+    );
+    for i in 0..3 {
+        write(
+            &e,
+            &format!("/semantic/{long}{i}.md"),
+            &sized(&format!("Payout journal {i}"), "payout journal rule", 7_990),
+        );
+    }
+    e.vcs().commit("main", "t", "seed").unwrap();
+    let (url, seen) = mock_llm(&notes(&[("/procedural/x.md", "# X\n\ny")]));
+    consolidate(&e, &llm(&url), None, "consolidate/long").unwrap();
+    assert_request_sizes(&seen.lock().unwrap(), 1);
+}
+
+/// `# title` plus `word` lines, cut to exactly `len` bytes (ASCII).
+fn sized(title: &str, word: &str, len: usize) -> String {
+    let mut s = format!("# {title}\n\n");
+    while s.len() < len {
+        s.push_str(word);
+        s.push('\n');
+    }
+    s.truncate(len);
+    s
+}
+
+/// At least `min` requests, each with system + user content of at most 48,000 bytes.
+fn assert_request_sizes(bodies: &[String], min: usize) {
+    assert!(bodies.len() >= min, "{} request(s)", bodies.len());
+    for body in bodies {
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         let total: usize = (0..2)
             .map(|i| v["messages"][i]["content"].as_str().unwrap().len())

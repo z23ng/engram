@@ -14,17 +14,17 @@ use serde::{Deserialize, Serialize};
 use crate::compiler::{compile_core, CompiledCoreContext};
 use crate::config::{ConsolidateLlmConfig, SearchConfig};
 use crate::embedder::DISABLED_MODEL;
-
-/// Embedding texts per request, and the chunk budget of one write transaction.
-const EMBED_GROUP_CHUNKS: usize = 128;
-/// Blobs indexed by another model that one search re-embeds; the rest wait for later calls.
-const STALE_PER_PASS: usize = 32;
 use crate::embedder::{
     cosine_similarity_le_bytes, encode_f32_vec, EmbeddingProvider, NoopEmbedder,
 };
 use crate::ingest::{ingest_knowledge, IngestOutcome, IngestRequest};
 use crate::vault::{export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats};
 use crate::wiki::{parse_wiki_document, ParsedWikiDocument};
+
+/// Embedding texts per request, and the chunk budget of one write transaction.
+const EMBED_GROUP_CHUNKS: usize = 128;
+/// Blobs indexed by another model that one search re-embeds; the rest wait for later calls.
+const STALE_PER_PASS: usize = 32;
 
 /// Query parameters for branch-isolated hybrid search.
 #[derive(Debug, Clone)]
@@ -206,8 +206,8 @@ impl MemSearchEngine {
             return Ok(stats);
         }
 
-        // Step 1: Under short read lock, identify blobs missing from chunk_index and read raw bytes.
-
+        // Step 1: Under short read lock, find blobs that are missing or stale (another model)
+        // and read their raw bytes.
         let model = self.embedder.model_id();
         let mut missing_raw: Vec<(BlobId, VirtualPath, Vec<u8>)> = Vec::new();
         let mut stale_taken = 0usize;
@@ -226,8 +226,7 @@ impl MemSearchEngine {
                         continue;
                     }
                     if stale_taken == STALE_PER_PASS {
-                        stats.blobs_cache_hit += 1; // re-embedded by a later call
-                        continue;
+                        continue; // re-embedded by a later call; not a cache hit
                     }
                     stale_taken += 1;
                 }
@@ -542,6 +541,7 @@ impl MemSearchEngine {
 
         // 2. Embed query outside the SQLite lock.
         let query_vec = self.embedder.embed_query(&req.query)?;
+        let model = self.embedder.model_id();
 
         // 3. Query FTS5, active embeddings, chunk titles/aliases, and active blob_links inside one lock.
         let active_data = self.vcs.store().with_conn(|conn| {
@@ -549,7 +549,7 @@ impl MemSearchEngine {
                 conn,
                 &paths_by_blob,
                 &req.query,
-                query_vec.as_deref(),
+                query_vec.as_deref().map(|v| (v, model.as_str())),
                 (req.top_k * 5).max(50),
             )
         })?;
@@ -956,7 +956,8 @@ fn load_active_search_data(
     conn: &Connection,
     paths_by_blob: &HashMap<BlobId, Vec<VirtualPath>>,
     query: &str,
-    query_vec: Option<&[f32]>,
+    // The query vector and the model that made it.
+    query_vec: Option<(&[f32], &str)>,
     fts_limit: usize,
 ) -> Result<ActiveSearchData> {
     conn.execute_batch(
@@ -1107,18 +1108,21 @@ fn load_active_search_data(
 
         // 4. Score active embeddings zero-allocation directly from SQLite BLOB slices.
         let mut vec_hits = Vec::new();
-        if let Some(q_vec) = query_vec {
+        if let Some((q_vec, model)) = query_vec {
             let mut stmt = conn
                 .prepare_cached(
+                    // Only vectors of the active model: another model's vectors (not yet
+                    // re-embedded) give meaningless similarities.
                     "SELECT c.blob_id, c.chunk_seq, c.embedding
                      FROM chunk_index AS c
                      INNER JOIN _mem_active_blobs AS a ON a.blob_id = c.blob_id
+                     INNER JOIN blob_index_model AS m ON m.blob_id = c.blob_id AND m.model = ?1
                      WHERE c.embedding IS NOT NULL",
                 )
                 .map_err(|e| {
                     MemError::Storage(format!("failed to prepare embedding query: {e}"))
                 })?;
-            let mut rows = stmt.query([]).map_err(|e| {
+            let mut rows = stmt.query(params![model]).map_err(|e| {
                 MemError::Storage(format!("failed to query active embeddings: {e}"))
             })?;
             let mut vec_best_by_blob: HashMap<BlobId, (usize, f32)> = HashMap::new();
@@ -1475,27 +1479,10 @@ fn index_is_fresh(conn: &Connection, blob_hex: &str, model: &str) -> Result<bool
     if model == DISABLED_MODEL {
         return Ok(true);
     }
-    let err = |e: rusqlite::Error| MemError::Storage(format!("failed to read index model: {e}"));
+    // No row (an index older than blob_index_model) means the model is unknown: stale.
     let stored: Option<String> = conn
         .prepare_cached("SELECT model FROM blob_index_model WHERE blob_id = ?1")
         .and_then(|mut stmt| stmt.query_row(params![blob_hex], |r| r.get(0)).optional())
-        .map_err(err)?;
-    if stored.is_some() {
-        return Ok(stored.as_deref() == Some(model));
-    }
-    // Vectors written before blob_index_model existed: adopt them for the active model.
-    let has_vectors = conn
-        .prepare_cached(
-            "SELECT 1 FROM chunk_index WHERE blob_id = ?1 AND embedding IS NOT NULL LIMIT 1",
-        )
-        .and_then(|mut stmt| stmt.exists(params![blob_hex]))
-        .map_err(err)?;
-    if has_vectors {
-        conn.execute(
-            "INSERT OR IGNORE INTO blob_index_model (blob_id, model) VALUES (?1, ?2)",
-            params![blob_hex, model],
-        )
-        .map_err(err)?;
-    }
-    Ok(has_vectors)
+        .map_err(|e| MemError::Storage(format!("failed to read index model: {e}")))?;
+    Ok(stored.as_deref() == Some(model))
 }

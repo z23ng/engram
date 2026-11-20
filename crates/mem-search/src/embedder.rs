@@ -390,15 +390,6 @@ fn http_post_json(
     Ok(body_str)
 }
 
-fn https_post_via_curl(
-    url: &str,
-    api_key: Option<&str>,
-    body: &str,
-    timeout: Duration,
-) -> Result<String> {
-    curl_post(url, api_key, body, timeout)
-}
-
 /// curl arguments and stdin. Headers and body go through `--config -` on stdin, so the API key
 /// never appears in the process arguments (readable by any local user through `ps`).
 fn curl_invocation(
@@ -433,7 +424,12 @@ fn curl_invocation(
     (args, config)
 }
 
-fn curl_post(url: &str, api_key: Option<&str>, body: &str, timeout: Duration) -> Result<String> {
+fn https_post_via_curl(
+    url: &str,
+    api_key: Option<&str>,
+    body: &str,
+    timeout: Duration,
+) -> Result<String> {
     let (args, config) = curl_invocation(url, api_key, body, timeout);
     let mut child = Command::new("curl")
         .args(&args)
@@ -597,7 +593,7 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
-    use super::{curl_invocation, curl_post, http_post_json};
+    use super::{curl_invocation, http_post_json, https_post_via_curl};
 
     /// One-shot HTTP server: returns the raw request and answers with `status`.
     fn serve_once(status: &str) -> (String, std::thread::JoinHandle<String>) {
@@ -646,10 +642,18 @@ mod tests {
 
     #[test]
     fn curl_sends_the_config_headers_and_the_exact_body() {
+        if std::process::Command::new("curl")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no curl binary on this host");
+            return;
+        }
         let (url, server) = serve_once("200 OK");
         let body = r#"{"a":"quote \" and backslash \\ and 中文"}"#;
         assert_eq!(
-            curl_post(&url, Some("sk-test"), body, Duration::from_secs(10)).unwrap(),
+            https_post_via_curl(&url, Some("sk-test"), body, Duration::from_secs(10)).unwrap(),
             "{}"
         );
         let req = server.join().unwrap();

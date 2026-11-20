@@ -11,13 +11,13 @@ const now = 10 * 3_600_000;
 
 describe("pollInterval", () => {
   it("polls while a recent run is running", () => {
-    expect(pollInterval([{ ...base, started_at_ms: now - 60_000 }], now)).toBe(2000);
+    expect(pollInterval([{ ...base, started_at_ms: now - 60_000 }])).toBe(2000);
   });
-  it("stops for a running row older than one hour (server restarted mid-run)", () => {
-    expect(pollInterval([{ ...base, started_at_ms: now - 2 * 3_600_000 }], now)).toBe(false);
+  it("keeps polling a run longer than one hour (the server clears rows of interrupted runs)", () => {
+    expect(pollInterval([{ ...base, started_at_ms: now - 2 * 3_600_000 }])).toBe(2000);
   });
   it("stops when no run is running", () => {
-    expect(pollInterval([{ ...base, status: "succeeded", started_at_ms: now }], now)).toBe(false);
-    expect(pollInterval(undefined, now)).toBe(false);
+    expect(pollInterval([{ ...base, status: "succeeded", started_at_ms: now }])).toBe(false);
+    expect(pollInterval(undefined)).toBe(false);
   });
 });

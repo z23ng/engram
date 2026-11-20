@@ -305,6 +305,16 @@ impl ControlPlane {
     }
 
     /// `None` turns the schedule off.
+    /// Marks runs left `running` by a stopped server as failed; returns how many. Called once
+    /// by `mem serve` at startup (a run reservation lives only in process memory).
+    pub fn fail_interrupted_runs(&self) -> Result<usize, ServerError> {
+        Ok(self.db()?.execute(
+            "UPDATE consolidation_runs SET status = 'failed', error = 'server restarted',
+             finished_at_ms = ?1 WHERE status = 'running'",
+            params![Utc::now().timestamp_millis()],
+        )?)
+    }
+
     pub fn set_consolidate_schedule(
         &self,
         project: &str,
@@ -313,6 +323,12 @@ impl ControlPlane {
         if every_hours == Some(0) {
             return Err(ServerError::BadRequest(
                 "every_hours must be at least 1".into(),
+            ));
+        }
+        if every_hours.is_some() && self.llm_config().backend == ProviderBackend::Disabled {
+            return Err(ServerError::BadRequest(
+                "no consolidation LLM is configured on this server; a schedule would never run"
+                    .into(),
             ));
         }
         let changed = self.db()?.execute(
@@ -452,12 +468,6 @@ async fn schedule(
     };
     let scope = project.clone();
     guarded(cp, headers, scope, Action::Manage, move |cp, key, _| {
-        if every_hours.is_some() && cp.llm_config().backend == ProviderBackend::Disabled {
-            return Err(ServerError::BadRequest(
-                "no consolidation LLM is configured on this server; a schedule would never run"
-                    .into(),
-            ));
-        }
         cp.set_consolidate_schedule(&project, every_hours)?;
         cp.record_audit(key, &project, "consolidate.schedule", None)?;
         Ok(Json(json!({ "every_hours": every_hours })))

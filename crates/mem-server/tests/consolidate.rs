@@ -367,6 +367,7 @@ fn an_older_server_db_is_migrated() {
     for _ in 0..2 {
         let (cp, _) =
             ControlPlane::open(dir.path(), Box::new(MemSearchEngine::new_bm25_only)).unwrap();
+        let cp = cp.with_llm_config(llm("http://127.0.0.1:9/v1"));
         let runs = cp.list_consolidations("alpha", 10).unwrap();
         assert_eq!((runs.len(), runs[0].batches_failed), (1, 0));
         cp.set_consolidate_schedule("alpha", Some(6)).unwrap();
@@ -460,5 +461,17 @@ async fn a_schedule_needs_an_llm_and_an_explicit_value() {
         .await
         .0,
         StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runs_left_running_by_a_stopped_server_are_marked_failed() {
+    let f = fixture(&mock_llm(Duration::ZERO));
+    let id = f.cp.start_consolidation("alpha", "manual", "root").unwrap();
+    assert_eq!(f.cp.fail_interrupted_runs().unwrap(), 1);
+    let run = f.cp.consolidation_run(id).unwrap();
+    assert_eq!(
+        (run.status.as_str(), run.error.as_deref()),
+        ("failed", Some("server restarted"))
     );
 }
