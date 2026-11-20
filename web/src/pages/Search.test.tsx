@@ -19,3 +19,18 @@ describe("SearchPage rebuild index", () => {
     expect(screen.queryByRole("button", { name: "Rebuild index" })).toBeNull();
   });
 });
+
+describe("SearchPage index badge", () => {
+  it("says when search runs on BM25 only", async () => {
+    const indexInfo = vi.fn(async () => ({ model: "disabled", files: 4, files_with_vectors: 0, chunks: 9 }));
+    renderWithApp(<SearchPage />, { route, client: { indexInfo } });
+    expect(await screen.findByText("BM25 only")).toBeTruthy();
+    expect(indexInfo).toHaveBeenCalledWith("alpha");
+  });
+
+  it("names the model and vector coverage in hybrid mode", async () => {
+    const indexInfo = vi.fn(async () => ({ model: "ollama:bge-m3", files: 4, files_with_vectors: 3, chunks: 9 }));
+    renderWithApp(<SearchPage />, { route, client: { indexInfo } });
+    expect(await screen.findByText("Hybrid · ollama:bge-m3 · 3/4 files embedded")).toBeTruthy();
+  });
+});

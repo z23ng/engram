@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Search } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, PageHeader } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
@@ -18,10 +19,17 @@ export function SearchPage() {
     queryFn: () => client.search(project, route.branch, query),
     enabled: !!query,
   });
+  const index = useQuery({ queryKey: ["index", project], queryFn: () => client.indexInfo(project) });
+  const mode = index.data
+    ? index.data.model === "disabled"
+      ? "BM25 only"
+      : `Hybrid · ${index.data.model} · ${index.data.files_with_vectors}/${index.data.files} files embedded`
+    : null;
   const reindex = useMutation({
     mutationFn: () => client.reindex(project),
     onSuccess: (r) => {
       queries.invalidateQueries({ queryKey: ["search", project] });
+      queries.invalidateQueries({ queryKey: ["index", project] });
       toast.success("Index rebuilt", { description: `${r.files_indexed} file(s), ${r.chunks} chunk(s), model ${r.model}` });
     },
     onError: (e) => toast.error("Rebuild failed", { description: errorText(e) }),
@@ -32,12 +40,15 @@ export function SearchPage() {
         title="Search"
         description={`Hybrid search over the ${route.branch} workspace (same results agents get through MCP).`}
         actions={
-          can(me).manage ? (
-            <Button variant="outline" size="sm" disabled={reindex.isPending} onClick={() => reindex.mutate()}>
-              <RefreshCw className={reindex.isPending ? "animate-spin" : undefined} />
-              Rebuild index
-            </Button>
-          ) : null
+          <>
+            {mode ? <Badge>{mode}</Badge> : null}
+            {can(me).manage ? (
+              <Button variant="outline" size="sm" disabled={reindex.isPending} onClick={() => reindex.mutate()}>
+                <RefreshCw className={reindex.isPending ? "animate-spin" : undefined} />
+                Rebuild index
+              </Button>
+            ) : null}
+          </>
         }
       />
       <form

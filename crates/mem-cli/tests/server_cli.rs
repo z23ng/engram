@@ -174,3 +174,51 @@ fn admin_reindex_rebuilds_a_project_index() {
         "--project is required"
     );
 }
+
+#[test]
+fn serve_logs_the_search_mode_of_each_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mem"))
+        .args([
+            "--provider",
+            "ollama",
+            "serve",
+            "--data",
+            data,
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .env("MEM_EMBEDDING_BASE_URL", "http://127.0.0.1:9")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut key = String::new();
+    let addr = loop {
+        let line = lines.next().expect("serve exited early").unwrap();
+        if let Some(k) = line.split_whitespace().find(|w| w.starts_with("egm_")) {
+            key = k.to_string();
+        }
+        if let Some(a) = line.strip_prefix("listening on ") {
+            break a.trim().to_string();
+        }
+    };
+    http_status(&addr, &key); // opens the alpha engine
+    child.kill().unwrap();
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    child.wait().unwrap();
+    assert!(
+        err.contains("project alpha: search model disabled"),
+        "{err}"
+    );
+    assert!(err.contains("unreachable"), "{err}");
+}

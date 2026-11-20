@@ -775,3 +775,21 @@ async fn reindex_rebuilds_the_project_index_for_admins_only() {
     assert_eq!(hits["hits"][0]["path"], "/semantic/a.md");
     assert_eq!(audit_ops(&f)[0], "rest.reindex");
 }
+
+#[tokio::test]
+async fn index_stats_report_model_and_coverage() {
+    let f = fixture();
+    let bot = key(&f, "bot", Role::Bot, Some(&["alpha"]));
+    let dev = key(&f, "dev", Role::Dev, Some(&["alpha"]));
+    rest_write(&f, &dev, "/semantic/a.md", "# A\n\nrouting", Some("a")).await;
+    rest_write(&f, &dev, "/semantic/b.md", "# B\n\nstaged", None).await;
+    let (status, r) = call(&f, "GET", "/api/v1/projects/alpha/index", Some(&bot), None).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["model"], "disabled", "{r}");
+    assert_eq!(
+        (r["files"].as_u64(), r["files_with_vectors"].as_u64()),
+        (Some(2), Some(0)),
+        "{r}"
+    );
+    assert!(r["chunks"].as_u64().unwrap() >= 2, "{r}");
+}

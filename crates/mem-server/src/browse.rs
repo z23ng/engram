@@ -1,4 +1,5 @@
-//! Read-only REST endpoints for the web client: branches, tree, log, status, diff, search, raw.
+//! Read-only REST endpoints for the web client: branches, tree, log, status, diff, search,
+//! index stats, raw.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue};
@@ -23,6 +24,7 @@ pub(crate) fn routes() -> Router<Shared> {
         .route("/api/v1/projects/{project}/status", get(status))
         .route("/api/v1/projects/{project}/diff", get(diff))
         .route("/api/v1/projects/{project}/search", get(search))
+        .route("/api/v1/projects/{project}/index", get(index_info))
         .route("/api/v1/projects/{project}/raw", get(raw))
 }
 
@@ -176,6 +178,24 @@ async fn search(
             req = req.with_prefix(VirtualPath::new(prefix)?);
         }
         Ok(Json(json!({"hits": engine.search(&req)?})))
+    })
+    .await
+}
+
+/// Active embedding model and index coverage (counts are per indexed content version).
+async fn index_info(
+    State(cp): State<Shared>,
+    Path(p): Path<String>,
+    headers: HeaderMap,
+) -> JsonResult {
+    guarded(cp, headers, p, Action::Read, move |_, _, engine| {
+        let (files, files_with_vectors, chunks) = engine.index_stats()?;
+        Ok(Json(json!({
+            "model": engine.embedding_model(),
+            "files": files,
+            "files_with_vectors": files_with_vectors,
+            "chunks": chunks,
+        })))
     })
     .await
 }

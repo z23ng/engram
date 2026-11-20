@@ -124,6 +124,7 @@ impl ControlPlane {
             return Ok(engine.clone());
         }
         let engine = (self.make_engine)(MemVcs::new(SqliteStore::open(self.project_db(slug))?));
+        eprintln!("project {slug}: search model {}", engine.embedding_model());
         engines.insert(slug.to_string(), engine.clone());
         Ok(engine)
     }

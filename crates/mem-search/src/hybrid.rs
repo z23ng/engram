@@ -440,6 +440,21 @@ impl MemSearchEngine {
         self.embedder.model_id()
     }
 
+    /// Index coverage over all indexed blobs: `(files, files_with_vectors, chunks)`.
+    pub fn index_stats(&self) -> Result<(u64, u64, u64)> {
+        self.vcs.store().with_conn(|conn| {
+            conn.query_row(
+                "SELECT count(DISTINCT blob_id),
+                        count(DISTINCT CASE WHEN embedding IS NOT NULL THEN blob_id END),
+                        count(*)
+                 FROM chunk_index",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| MemError::Storage(format!("failed to read index stats: {e}")))
+        })
+    }
+
     /// Drops the whole search index, then indexes every branch view (head plus staged changes)
     /// with the current embedder. Blobs only in older commits are indexed again on first search.
     pub fn reindex_all(&self) -> Result<IndexingStats> {

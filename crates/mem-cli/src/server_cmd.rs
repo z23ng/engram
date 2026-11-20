@@ -41,7 +41,13 @@ pub fn cmd_serve(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     let mut args = args.to_vec();
     let listen = take_flag(&mut args, "--listen")?.unwrap_or_else(|| "127.0.0.1:7878".into());
     let emb_cfg = opts.embedding_config();
-    let factory: EngineFactory = Box::new(move |vcs: MemVcs| build_search_engine(vcs, &emb_cfg).0);
+    let factory: EngineFactory = Box::new(move |vcs: MemVcs| {
+        let (engine, notice) = build_search_engine(vcs, &emb_cfg);
+        if let Some(notice) = notice {
+            eprintln!("{notice}");
+        }
+        engine
+    });
     let (cp, _) = open_control(&mut args, factory)?;
     let cp = cp.with_llm_config(opts.consolidate_config());
     if let Some(extra) = args.first() {
