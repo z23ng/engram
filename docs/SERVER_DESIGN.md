@@ -135,6 +135,42 @@ CLI additions: `mem serve --data <dir> --listen <addr>`, `mem admin project crea
 | S3 | WebDAV vault with idle auto-commit. | PROPFIND lists tier folders. PUT `.md` -> `mem_read` returns it. `bot` PUT -> 403. Idle commit creates one commit for many PUTs. |
 | S4 | Web client (full REST + embedded SPA). | REST contract tests; build smoke test. |
 | S5 | Docker (non-root, distroless), docs, ROADMAP 3.4 done. | - |
+| S6 | Background consolidation (section 7.1). | See 7.1 tests. |
+
+### 7.1 S6 background consolidation (ROADMAP 4.3)
+
+Decisions (TL, 2026-11-20): manual trigger plus an optional per-project schedule; the result is a review branch that a person merges. The hot path stays free of LLM calls.
+
+Input:
+
+- Source revision: the head commit of `main` when the run starts. Staged changes and other branches are never read.
+- Source files: `/episodic/**/*.md` files added or changed since the `source_commit` of the last successful run (all of `/episodic/` on the first run). No new episodic changes -> the run ends as `skipped` and makes no branch.
+- Context per source file: the top 3 search hits for its title in `/semantic/` and `/procedural/` on the same revision (deterministic search, no extra LLM call), with full content.
+- Batches: at most 8 source files and 48,000 characters of prompt text per LLM call, so a 7B local model fits.
+
+LLM call (reuses `ConsolidateLlmConfig` and the OpenAI-compatible `chat/completions` client of `ingest.rs`; temperature 0.1):
+
+- The prompt asks for JSON only: `{"notes":[{"path": "...", "content": "..."}]}`. `content` is the full new Markdown of a note (create, or a full rewrite of one of the context notes).
+- Validation, deny by default: `path` must be a valid `VirtualPath` under `/semantic/` or `/procedural/`, end in `.md`, not be under `_attachments/` or `_templates/`, and `content` must be non-empty and at most 256 KiB. Invalid notes are dropped and counted. The run never deletes, and never writes `/core/` or `/episodic/`.
+- Unparsable output for a batch, or an unreachable LLM, fails the run. A failed run creates no branch.
+
+Output:
+
+- New branch `consolidate/<UTC yyyymmdd-HHMM>` from the source commit; the valid notes are written and committed once, author `consolidator:<model>`, message `consolidate: <N> note(s) from <M> episodic file(s) @ <source_commit[..10]>`. Notes whose content equals the current blob are skipped; if no note changes anything the run ends as `no_changes` and the branch is removed.
+- Nothing merges automatically. A person reviews the diff (Branches / History) and uses the existing Merge action; merge author = key name.
+- Control-plane table `consolidation_runs(id, project, trigger 'manual'|'schedule', requested_by, status 'running'|'succeeded'|'no_changes'|'skipped'|'failed', source_commit, branch, files_in, notes_written, notes_dropped, error, started_at_ms, finished_at_ms)`. Audit `consolidate.run` with the commit id.
+- One run per project at a time: a second request while one is running returns 409.
+
+Triggers:
+
+- `POST /api/v1/projects/{p}/consolidate` (Manage) -> 202 `{run_id}`; the run executes on a blocking thread. `GET .../consolidate/runs?limit=` (Manage) lists runs, newest first.
+- `mem admin --data <dir> consolidate --project <slug>` runs synchronously and prints the result (same embedder and LLM settings as `mem serve`).
+- Schedule: `projects.consolidate_every_hours` (NULL = off, default). Set with `PUT .../consolidate/schedule {"every_hours": N|null}` (Manage) or `mem admin project schedule <slug> --every <hours|off>`. `mem serve` runs one tokio task that wakes every 60 s and starts a `schedule` run for each project whose last finished run (any status) is at least `every_hours` old.
+- Console: on Branches, admin keys see "Consolidate now", the schedule selector (off / 6 h / 24 h / 7 d), and the last 10 runs with status, branch link, and error. `consolidate/*` branches carry an "LLM" badge.
+
+Privacy: with the OpenAI backend, episodic and context note text leaves the machine. `mem serve` logs the LLM backend and model at startup.
+
+Tests (mock LLM on a local `TcpListener`, as in `ingest.rs`): path validation table (core, episodic, `..`, non-md, attachments, oversize); a manual run writes the expected notes on a `consolidate/*` branch with author `consolidator:<model>` and leaves `main` unchanged; a second run with no new episodic changes is `skipped`; an unreachable LLM gives `failed` and no branch; output identical to existing notes gives `no_changes`; a concurrent trigger gets 409; dev and bot keys get 403; the schedule picks only due projects (injected clock); CLI command prints the run result; the UI shows the button only for admin and lists runs.
 
 ## 8. Out of scope (v1)
 
