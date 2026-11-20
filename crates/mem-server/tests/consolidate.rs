@@ -492,9 +492,14 @@ fn mem_serve_clears_interrupted_runs_at_startup_without_delaying_the_schedule() 
     let id = db.last_insert_rowid();
 
     let cp = f.cp.clone();
-    std::thread::spawn(move || mem_server::run_server(cp, "127.0.0.1:0"));
+    let server = std::thread::spawn(move || mem_server::run_server(cp, "127.0.0.1:0"));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while f.cp.consolidation_run(id).unwrap().status == "running" {
+        assert!(
+            !server.is_finished(),
+            "run_server stopped: {:?}",
+            server.join()
+        );
         assert!(
             std::time::Instant::now() < deadline,
             "run_server did not clear the row"
@@ -514,8 +519,39 @@ fn mem_serve_clears_interrupted_runs_at_startup_without_delaying_the_schedule() 
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Let the scheduled run finish before the fixture deletes its directory.
+    while f.cp.list_consolidations("alpha", 1).unwrap()[0].status == "running" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the scheduled run did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(
         f.cp.list_consolidations("alpha", 10).unwrap()[0].trigger,
         "schedule"
+    );
+}
+
+#[test]
+fn a_run_that_panics_inside_finish_consolidation_is_marked_aborted() {
+    let dir = tempfile::tempdir().unwrap();
+    ControlPlane::open(dir.path(), Box::new(MemSearchEngine::new_bm25_only))
+        .unwrap()
+        .0
+        .create_project("alpha")
+        .unwrap();
+    // The run opens the project engine first; this factory panics there.
+    let (cp, _) =
+        ControlPlane::open(dir.path(), Box::new(|_| panic!("engine open failed"))).unwrap();
+    let cp = cp.with_llm_config(llm("http://127.0.0.1:9/v1"));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cp.consolidate_now("alpha", "root")
+    }));
+    assert!(result.is_err(), "the run panicked");
+    let run = &cp.list_consolidations("alpha", 1).unwrap()[0];
+    assert_eq!(
+        (run.status.as_str(), run.error.as_deref()),
+        ("failed", Some("run aborted"))
     );
 }

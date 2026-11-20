@@ -529,11 +529,13 @@ fn assert_request_sizes(bodies: &[String], min: usize) {
 #[test]
 fn a_short_source_keeps_all_three_context_notes() {
     let (_d, e) = repo();
-    // 3 x (header + 7,990) = 24,306 bytes: fits next to 500 bytes, not next to 23,000.
+    // 3 x (header + 7,990) = 24,306 bytes: fits next to 500 bytes, not next to 23,000. With the
+    // long source path the old reservation leaves 24,187 bytes (SYSTEM_PROMPT is 622 bytes), so
+    // the test still detects the old formula unless SYSTEM_PROMPT shrinks by 119 bytes or more.
     let long = "payout-journal-".repeat(6);
     write(
         &e,
-        "/episodic/short.md",
+        &format!("/episodic/{long}.md"),
         &sized("Payout journal", "payout journal entry", 500),
     );
     for i in 0..3 {
