@@ -171,6 +171,7 @@ async fn a_manual_run_commits_a_review_branch_and_records_the_run() {
         (Some(1), Some(1)),
         "{run}"
     );
+    assert_eq!(run["batches_failed"], 0, "{run}");
     let branch = run["branch"].as_str().unwrap();
     assert!(branch.starts_with("consolidate/"), "{run}");
     let engine = f.cp.engine("alpha").unwrap();
@@ -331,4 +332,32 @@ async fn the_schedule_picks_only_due_projects() {
             .is_empty(),
         "off"
     );
+}
+
+#[test]
+fn an_older_server_db_is_migrated() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = rusqlite::Connection::open(dir.path().join("server.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE projects (slug TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+             CREATE TABLE consolidation_runs (
+                 id INTEGER PRIMARY KEY, project TEXT NOT NULL, trigger TEXT NOT NULL,
+                 requested_by TEXT NOT NULL, status TEXT NOT NULL, source_commit TEXT, branch TEXT,
+                 files_in INTEGER NOT NULL DEFAULT 0, notes_written INTEGER NOT NULL DEFAULT 0,
+                 notes_dropped INTEGER NOT NULL DEFAULT 0, error TEXT, started_at_ms INTEGER NOT NULL,
+                 finished_at_ms INTEGER);
+             INSERT INTO projects VALUES ('alpha', 1);
+             INSERT INTO consolidation_runs (project, trigger, requested_by, status, started_at_ms, finished_at_ms)
+             VALUES ('alpha', 'manual', 'root', 'failed', 1, 2);",
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        let (cp, _) =
+            ControlPlane::open(dir.path(), Box::new(MemSearchEngine::new_bm25_only)).unwrap();
+        let runs = cp.list_consolidations("alpha", 10).unwrap();
+        assert_eq!((runs.len(), runs[0].batches_failed), (1, 0));
+        cp.set_consolidate_schedule("alpha", Some(6)).unwrap();
+    }
 }

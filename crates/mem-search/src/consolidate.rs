@@ -63,6 +63,10 @@ pub struct ConsolidateOutcome {
     /// Review branch, only when `status` is `Succeeded`.
     pub branch: Option<String>,
     pub commit_id: Option<CommitId>,
+    /// Batches skipped because the LLM call failed or its output was unusable.
+    pub batches_failed: usize,
+    /// One message per skipped batch: `batch <i> of <n>: <error>`.
+    pub batch_errors: Vec<String>,
 }
 
 /// Deny by default: only non-empty `.md` notes up to 256 KiB under `/semantic/` or
@@ -239,7 +243,8 @@ const SYSTEM_PROMPT: &str =
 what happened. Extract durable facts into notes under /semantic/ and repeatable procedures into \
 notes under /procedural/. To change a related existing note, return its path with the full new \
 content; otherwise create a new note with a short kebab-case file name. Keep facts verbatim and do \
-not invent anything. Reply with JSON only, in this form: \
+not invent anything. Return at most 5 notes, each under 4,000 characters; prefer fewer, \
+shorter notes. Reply with JSON only, in this form: \
 {\"notes\":[{\"path\":\"/semantic/<name>.md\",\"content\":\"<full Markdown>\"}]}. \
 Return {\"notes\":[]} when nothing durable is found.";
 
@@ -327,6 +332,8 @@ pub fn consolidate(
         notes_dropped: 0,
         branch: None,
         commit_id: None,
+        batches_failed: 0,
+        batch_errors: Vec::new(),
     };
     let paths = episodic_paths(engine, &source_commit, since)?;
     if paths.is_empty() {
@@ -354,8 +361,20 @@ pub fn consolidate(
         .flatten()
         .collect();
     let mut notes: BTreeMap<VirtualPath, String> = BTreeMap::new();
-    for batch in batches(sources) {
-        for note in ask_llm(cfg, &batch)? {
+    let batches = batches(sources);
+    let total = batches.len();
+    for (i, batch) in batches.iter().enumerate() {
+        // A bad batch is skipped and counted; the run fails only when every batch fails.
+        let reply = match ask_llm(cfg, batch) {
+            Ok(reply) => reply,
+            Err(e) => {
+                out.batches_failed += 1;
+                out.batch_errors
+                    .push(format!("batch {} of {total}: {e}", i + 1));
+                continue;
+            }
+        };
+        for note in reply {
             if !note_is_valid(&note.path, &note.content) {
                 out.notes_dropped += 1;
                 continue;
@@ -365,6 +384,9 @@ pub fn consolidate(
                 notes.insert(path, note.content);
             }
         }
+    }
+    if out.batches_failed == total {
+        return Err(MemError::Storage(out.batch_errors.join("; ")));
     }
     if notes.is_empty() {
         out.status = ConsolidateStatus::NoChanges;

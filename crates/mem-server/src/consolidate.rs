@@ -19,18 +19,28 @@ use crate::{Action, ApiKey, ControlPlane, Role, ServerError};
 
 const HOUR_MS: i64 = 3_600_000;
 
-/// Adds `projects.consolidate_every_hours` to control planes created before S6.
+/// Adds the S6 columns to control planes created before them (idempotent).
 pub(crate) fn migrate(conn: &Connection) -> Result<(), ServerError> {
-    let has_column = conn
+    add_column(conn, "projects", "consolidate_every_hours", "INTEGER")?;
+    add_column(
+        conn,
+        "consolidation_runs",
+        "batches_failed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<(), ServerError> {
+    let exists = conn
         .query_row(
-            "SELECT 1 FROM pragma_table_info('projects') WHERE name = 'consolidate_every_hours'",
-            [],
+            "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
             |_| Ok(()),
         )
         .optional()?
         .is_some();
-    if !has_column {
-        conn.execute_batch("ALTER TABLE projects ADD COLUMN consolidate_every_hours INTEGER")?;
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
     }
     Ok(())
 }
@@ -47,13 +57,14 @@ pub struct ConsolidationRun {
     pub files_in: i64,
     pub notes_written: i64,
     pub notes_dropped: i64,
+    pub batches_failed: i64,
     pub error: Option<String>,
     pub started_at_ms: i64,
     pub finished_at_ms: Option<i64>,
 }
 
 const RUN_COLUMNS: &str = "id, project, trigger, requested_by, status, source_commit, branch, \
-    files_in, notes_written, notes_dropped, error, started_at_ms, finished_at_ms";
+    files_in, notes_written, notes_dropped, error, started_at_ms, finished_at_ms, batches_failed";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<ConsolidationRun> {
     Ok(ConsolidationRun {
@@ -70,6 +81,7 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<ConsolidationRun> {
         error: r.get(10)?,
         started_at_ms: r.get(11)?,
         finished_at_ms: r.get(12)?,
+        batches_failed: r.get(13)?,
     })
 }
 
@@ -178,7 +190,8 @@ impl ControlPlane {
         let commit = out.commit_id.map(|c| c.to_hex());
         self.db()?.execute(
             "UPDATE consolidation_runs SET status = ?2, source_commit = ?3, branch = ?4,
-             files_in = ?5, notes_written = ?6, notes_dropped = ?7, finished_at_ms = ?8 WHERE id = ?1",
+             files_in = ?5, notes_written = ?6, notes_dropped = ?7, finished_at_ms = ?8,
+             batches_failed = ?9, error = ?10 WHERE id = ?1",
             params![
                 run_id,
                 out.status.as_str(),
@@ -187,7 +200,10 @@ impl ControlPlane {
                 out.files_in as i64,
                 out.notes_written as i64,
                 out.notes_dropped as i64,
-                Utc::now().timestamp_millis()
+                Utc::now().timestamp_millis(),
+                out.batches_failed as i64,
+                // Skipped batches of a run that still committed notes.
+                (!out.batch_errors.is_empty()).then(|| out.batch_errors.join("; ")),
             ],
         )?;
         self.record_audit(key, project, "consolidate.run", commit.as_deref())

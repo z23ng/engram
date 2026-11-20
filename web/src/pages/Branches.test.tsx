@@ -13,17 +13,22 @@ const branches = vi.fn(async () => [
 ]);
 const run: ConsolidationRun = {
   id: 7, project: "alpha", trigger: "manual", requested_by: "root", status: "failed", source_commit: null,
-  branch: null, files_in: 2, notes_written: 0, notes_dropped: 0, error: "LLM unreachable", started_at_ms: 1, finished_at_ms: 2,
+  branch: null, files_in: 2, notes_written: 0, notes_dropped: 0, error: "LLM unreachable", started_at_ms: 1, finished_at_ms: 2, batches_failed: 0,
+};
+const partial: ConsolidationRun = {
+  ...run, id: 9, status: "succeeded", branch: "consolidate/20261120-0900", notes_written: 3, batches_failed: 1,
+  error: "batch 3 of 4: output cut",
 };
 
 describe("Branches consolidation", () => {
   it("lets an admin start a run, set the schedule, and see past runs", async () => {
     const consolidate = vi.fn(async () => ({ run_id: 8 }));
     const setConsolidateSchedule = vi.fn(async () => ({ every_hours: 24 }));
-    const consolidationRuns = vi.fn(async () => ({ runs: [run], every_hours: null }));
+    const consolidationRuns = vi.fn(async () => ({ runs: [run, partial], every_hours: null }));
     renderWithApp(<Branches />, { me: admin, route, client: { branches, consolidate, consolidationRuns, setConsolidateSchedule } });
 
     expect(await screen.findByText("LLM unreachable")).toBeTruthy();
+    expect(screen.getByText(/1 batch\(es\) skipped/)).toBeTruthy();
     expect(screen.getByText("LLM")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Consolidate now" }));
     expect(consolidate).toHaveBeenCalledWith("alpha");

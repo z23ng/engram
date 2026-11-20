@@ -153,13 +153,14 @@ LLM call (reuses `ConsolidateLlmConfig` and the OpenAI-compatible `chat/completi
 
 - The prompt asks for JSON only: `{"notes":[{"path": "...", "content": "..."}]}`. `content` is the full new Markdown of a note (create, or a full rewrite of one of the context notes).
 - Validation, deny by default: `path` must be a valid `VirtualPath` under `/semantic/` or `/procedural/`, end in `.md`, not be under `_attachments/` or `_templates/`, and `content` must be non-empty and at most 256 KiB. Invalid notes are dropped and counted. The run never deletes, and never writes `/core/` or `/episodic/`.
-- Unparsable output for a batch, or an unreachable LLM, fails the run. A failed run creates no branch.
+- The prompt asks for at most 5 notes per batch, each under 4,000 characters.
+- A batch whose LLM call fails or whose output is unparsable is skipped and counted (`batches_failed`; the run `error` lists `batch <i> of <n>: <reason>`), and the run still commits the notes of the good batches. The run fails only when every batch fails. A failed run creates no branch. (TL decision 2026-11-20, after a 7B batch on kepay-v1 exceeded the output cap.)
 
 Output:
 
 - New branch `consolidate/<UTC yyyymmdd-HHMM>` from the source commit; the valid notes are written and committed once, author `consolidator:<model>`, message `consolidate: <N> note(s) from <M> episodic file(s) @ <source_commit[..10]>`. Notes whose content equals the current blob are skipped; if no note changes anything the run ends as `no_changes` and the branch is removed.
 - Nothing merges automatically. A person reviews the diff (Branches / History) and uses the existing Merge action; merge author = key name.
-- Control-plane table `consolidation_runs(id, project, trigger 'manual'|'schedule', requested_by, status 'running'|'succeeded'|'no_changes'|'skipped'|'failed', source_commit, branch, files_in, notes_written, notes_dropped, error, started_at_ms, finished_at_ms)`. Audit `consolidate.run` with the commit id.
+- Control-plane table `consolidation_runs(id, project, trigger 'manual'|'schedule', requested_by, status 'running'|'succeeded'|'no_changes'|'skipped'|'failed', source_commit, branch, files_in, notes_written, notes_dropped, batches_failed, error, started_at_ms, finished_at_ms)`; `batches_failed` is added by an idempotent migration. Audit `consolidate.run` with the commit id.
 - One run per project at a time: a second request while one is running returns 409.
 
 Triggers:

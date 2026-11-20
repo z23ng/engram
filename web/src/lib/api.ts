@@ -14,6 +14,7 @@ export type ConsolidationRun = {
   files_in: number;
   notes_written: number;
   notes_dropped: number;
+  batches_failed: number;
   error: string | null;
   started_at_ms: number;
   finished_at_ms: number | null;

@@ -101,6 +101,7 @@ export function ConsolidationPanel() {
                 {r.status !== "failed" && r.status !== "running" ? (
                   <span className="ml-2 text-muted-foreground">
                     {r.files_in} episodic file(s), {r.notes_written} note(s){r.notes_dropped ? `, ${r.notes_dropped} dropped` : ""}
+                    {r.batches_failed ? `, ${r.batches_failed} batch(es) skipped` : ""}
                   </span>
                 ) : null}
               </TD>

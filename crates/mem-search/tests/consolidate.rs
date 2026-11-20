@@ -44,12 +44,19 @@ fn llm(base_url: &str) -> ConsolidateLlmConfig {
 /// Mock OpenAI-compatible chat endpoint: answers each request with `reply` as message content
 /// and records request bodies.
 fn mock_llm(reply: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+    mock_llm_seq(&[reply])
+}
+
+/// Like `mock_llm`, but answers request `i` with `replies[i % replies.len()]`.
+fn mock_llm_seq(replies: &[&str]) -> (String, Arc<Mutex<Vec<String>>>) {
+    let replies: Vec<String> = replies.iter().map(|r| r.to_string()).collect();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let (reply, log) = (reply.to_string(), seen.clone());
+    let log = seen.clone();
     thread::spawn(move || {
-        for stream in listener.incoming() {
+        for (i, stream) in listener.incoming().enumerate() {
+            let reply = &replies[i % replies.len()];
             let mut stream = stream.unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut len = 0usize;
@@ -320,5 +327,50 @@ fn llm_requests_cap_the_output_length() {
     assert_eq!(
         body["max_tokens"], 8192,
         "a runaway generation must end: {body}"
+    );
+}
+
+#[test]
+fn a_bad_batch_is_skipped_and_counted_and_good_batches_are_committed() {
+    let (_d, e) = repo();
+    for name in ["a", "b"] {
+        let mut log = format!("# Journal {name}\n\n");
+        while log.len() < 30_000 {
+            log.push_str("payout retried after timeout.\n");
+        }
+        write(&e, &format!("/episodic/{name}.md"), &log);
+    }
+    e.vcs().commit("main", "t", "seed").unwrap();
+    let good = notes(&[("/procedural/retry.md", "# Retry\n\ntwice")]);
+    let (url, seen) = mock_llm_seq(&[
+        &good,
+        "{\"notes\": [{\"path\": \"/semantic/x.md\", \"content\": \"cut",
+    ]);
+
+    let out = consolidate(&e, &llm(&url), None, "consolidate/partial").unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2, "two batches");
+    assert_eq!(
+        (out.status, out.notes_written, out.batches_failed),
+        (ConsolidateStatus::Succeeded, 1, 1)
+    );
+    assert!(
+        out.batch_errors[0].contains("batch 2 of 2"),
+        "{:?}",
+        out.batch_errors
+    );
+    assert!(e.vcs().head_commit("consolidate/partial").is_ok());
+}
+
+#[test]
+fn the_prompt_limits_notes_per_batch() {
+    let (_d, e) = repo();
+    seed(&e);
+    let (url, seen) = mock_llm(&notes(&[("/procedural/x.md", "# X\n\ny")]));
+    consolidate(&e, &llm(&url), None, "consolidate/limits").unwrap();
+    let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+    let system = body["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("at most 5 notes") && system.contains("4,000 characters"),
+        "{system}"
     );
 }
