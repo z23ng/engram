@@ -175,7 +175,7 @@ Implementation notes (S6 as built):
 - When `consolidate/<UTC yyyymmdd-HHMM>` already exists (two runs in one minute), the branch gets the suffix `-<run_id>`.
 - "Last successful run" = the newest run with status `succeeded`, `no_changes`, or `skipped`; each of them consumed the episodic files up to its `source_commit`.
 - `GET .../consolidate/runs` also returns `every_hours`, so the console needs one call. Schedule changes are audited as `consolidate.schedule`; every finished run (also `skipped` and `no_changes`) is audited as `consolidate.run`.
-- Each LLM call has a 600 s timeout and asks for `response_format: json_object`; the reply may wrap the JSON in a fence or prose.
+- Each LLM call has a 600 s timeout, `max_tokens: 8192` (a runaway generation then ends as unparsable output instead of hitting the timeout), and asks for `response_format: json_object`; the reply may wrap the JSON in a fence or prose.
 - The one-run guard is per process: `mem admin consolidate` and a running `mem serve` do not see each other's runs. A run interrupted by a server stop stays `running` in the table.
 
 Privacy: with the OpenAI backend, episodic and context note text leaves the machine. `mem serve` logs the LLM backend and model at startup.

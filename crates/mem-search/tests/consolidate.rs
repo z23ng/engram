@@ -309,3 +309,16 @@ fn llm_errors_name_the_consolidation_llm() {
     let err = consolidate(&e, &llm("http://127.0.0.1:9/v1"), None, "consolidate/x").unwrap_err();
     assert!(err.to_string().contains("consolidation LLM"), "{err}");
 }
+
+#[test]
+fn llm_requests_cap_the_output_length() {
+    let (_d, e) = repo();
+    seed(&e);
+    let (url, seen) = mock_llm(&notes(&[("/procedural/x.md", "# X\n\ny")]));
+    consolidate(&e, &llm(&url), None, "consolidate/cap").unwrap();
+    let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+    assert_eq!(
+        body["max_tokens"], 8192,
+        "a runaway generation must end: {body}"
+    );
+}

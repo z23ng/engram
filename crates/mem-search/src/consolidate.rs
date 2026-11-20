@@ -27,6 +27,8 @@ const SOURCE_PART_BYTES: usize = 23_000;
 const CONTEXT_NOTE_BYTES: usize = 8_000;
 const MAX_NOTE_BYTES: usize = 256 * 1024;
 const CONTEXT_NOTES: usize = 3;
+/// Ends a runaway generation; a ~15k-token prompt plus this fits a 32k context.
+const MAX_OUTPUT_TOKENS: u32 = 8192;
 /// A local 7B model can need minutes for a full batch.
 const LLM_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -273,6 +275,7 @@ fn ask_llm(cfg: &ConsolidateLlmConfig, batch: &[Source]) -> Result<Vec<ReplyNote
     let body = serde_json::json!({
         "model": cfg.model,
         "temperature": 0.1,
+        "max_tokens": MAX_OUTPUT_TOKENS,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
