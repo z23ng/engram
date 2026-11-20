@@ -70,3 +70,15 @@
    4. Find the failing call in the Ollama `[GIN]` lines (endpoint and status) before trusting an error message from a shared helper.
 3. Relations
    - `crates/mem-search/src/consolidate.rs`, `crates/mem-search/tests/consolidate.rs`
+
+## [ClaudeCode][eval_trace][tdd-gate] 2026-11-20 Trace gate reported TDD FAIL for a Rust session that ran Red before every production edit
+1. Failure Mode
+   - `python3 ~/.claude/scripts/eval_trace.py --gate --transcript=<session>.jsonl` -> `"tdd_verdict": "FAIL"`, `"parallel_ratio": 0.12`, exit 1.
+   - First "production edit" found: `crates/mem-mcp/tests/jsonrpc.rs` (a Rust integration test; `guard_edit.TEST_PATTERNS` has no Rust pattern). With `(^|/)tests/[^/]+\.rs$` added in memory, the first edit is `crates/mem-server/src/error.rs` (2026-11-19T09:18:13) and the first recognized Red is 09:20:07, although `cargo test -p mem-server` at 09:17:23 already failed to compile: a compile error matches neither `is_error` (exit code hidden by `| grep`) nor `FAIL_HINT`.
+   - `parallel_ratio` 0.11-0.12 (below 0.4): most steps were dependent edit -> test chains.
+2. Rules
+   1. Run Red commands so the failure is visible to the evaluator: keep the exit code (`set -o pipefail`, or no pipe) or let the output contain `N failed`.
+   2. Before trusting a gate FAIL, print `_first_edit` / `_first_red` from `eval_trace.evaluate()` and check the order in the transcript.
+   3. Batch independent reads (API surface, helpers, configs) into one response to raise `parallel_ratio`.
+3. Relations
+   - `~/.claude/scripts/eval_trace.py`, `~/.claude/scripts/guard_edit.py` (outside this repo)
