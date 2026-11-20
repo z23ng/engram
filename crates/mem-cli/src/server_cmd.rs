@@ -23,7 +23,8 @@ fn take_switch(args: &mut Vec<String>, flag: &str) -> bool {
     found.map(|i| args.remove(i)).is_some()
 }
 
-/// Runs `f` on the first Ctrl-C. The handler is registered before this returns.
+/// Runs `f` on the first Ctrl-C. On unix the handler is registered before this returns; on
+/// other targets it is registered a moment later, on the first poll of `ctrl_c()`.
 fn on_ctrl_c(f: impl FnOnce() + Send + 'static) -> Result<(), String> {
     let (ready_tx, ready) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -128,6 +129,9 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     let full = take_switch(&mut args, "--full");
     let err = |e: mem_server::ServerError| e.to_string();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if full && words != ["consolidate"] {
+        return Err(format!("--full applies only to consolidate\n{ADMIN_USAGE}"));
+    }
     match words.as_slice() {
         ["project", "create", slug] => {
             cp.create_project(slug).map_err(err)?;
@@ -203,15 +207,16 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
         }
         ["consolidate"] => {
             let project = project.ok_or("--project is required")?;
-            let run_id = cp
-                .start_consolidation(&project, "manual", "cli:admin")
-                .map_err(err)?;
-            // `None` = Ctrl-C: the run thread is still waiting (for the LLM), so mark the row here.
+            // `None` = Ctrl-C: the run thread may still wait for the LLM, so mark the row here.
+            // The handler is registered before the run row exists, so no Ctrl-C leaves it running.
             let (tx, rx) = std::sync::mpsc::channel();
             let interrupt = tx.clone();
             on_ctrl_c(move || {
                 let _ = interrupt.send(None);
             })?;
+            let run_id = cp
+                .start_consolidation(&project, "manual", "cli:admin")
+                .map_err(err)?;
             let cp = Arc::new(cp);
             let (worker, name) = (cp.clone(), project.clone());
             std::thread::spawn(move || {
@@ -228,10 +233,14 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
                 let _ = tx.send(Some(run));
             });
             let Some(run) = rx.recv().map_err(|e| e.to_string())? else {
-                cp.abort_run(run_id, "interrupted").map_err(err)?;
-                return Err(format!(
-                    "consolidate {project}: interrupted; run {run_id} marked failed"
-                ));
+                return Err(match cp.abort_run(run_id, "interrupted").map_err(err)? {
+                    0 => format!("consolidate {project}: interrupted after run {run_id} finished"),
+                    // After the LLM phase a `consolidate/*` branch may already hold notes.
+                    _ => format!(
+                        "consolidate {project}: interrupted; run {run_id} marked failed \
+                         (check for a consolidate/* branch without a run)"
+                    ),
+                });
             };
             let run = run.map_err(err)?;
             println!(

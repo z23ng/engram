@@ -581,3 +581,22 @@ async fn a_full_run_reads_every_episodic_file_again() {
         "full re-reads"
     );
 }
+
+#[test]
+fn an_aborted_run_keeps_its_status_when_the_run_finishes_later() {
+    let f = fixture(&mock_llm(Duration::ZERO));
+    let id = f.cp.start_consolidation("alpha", "manual", "root").unwrap();
+    assert_eq!(f.cp.abort_run(id, "interrupted").unwrap(), 1);
+    assert_eq!(
+        f.cp.abort_run(id, "interrupted").unwrap(),
+        0,
+        "already finished"
+    );
+    let run =
+        f.cp.finish_consolidation(id, "alpha", &mem_server::system_key("root"), false)
+            .unwrap();
+    assert_eq!(
+        (run.status.as_str(), run.error.as_deref()),
+        ("failed", Some("interrupted"))
+    );
+}

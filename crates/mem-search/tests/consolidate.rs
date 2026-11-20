@@ -585,3 +585,19 @@ fn a_shrinking_rewrite_and_a_note_duplicated_across_tiers_are_dropped() {
     );
     assert!(read(&e, head, "/semantic/docs/channels.md").is_none());
 }
+
+#[test]
+fn the_same_new_note_in_both_tiers_of_one_run_is_written_once() {
+    let (_d, e) = repo();
+    seed(&e);
+    let reply = notes(&[
+        (
+            "/procedural/fallback.md",
+            "# Fallback SOP\n\n1. Switch to kbz.",
+        ),
+        ("/semantic/fallback.md", "# Fallback\n\nSwitch to kbz."),
+    ]);
+    let (url, _) = mock_llm(&reply);
+    let out = consolidate(&e, &llm(&url), None, "consolidate/twins").unwrap();
+    assert_eq!((out.notes_written, out.notes_dropped), (1, 1), "{out:?}");
+}

@@ -453,6 +453,24 @@ fn consolidate_full_reads_every_episodic_file_again() {
 }
 
 #[test]
+fn full_is_refused_outside_consolidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    project_with_log(data);
+    let (ok, text) = mem(&[
+        "admin",
+        "reindex",
+        "--project",
+        "alpha",
+        "--full",
+        "--data",
+        data,
+    ]);
+    assert!(!ok && text.contains("usage"), "{text}");
+}
+
+#[cfg(unix)] // sends SIGINT with `kill`
+#[test]
 fn ctrl_c_marks_a_cli_consolidation_run_failed() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_str().unwrap();

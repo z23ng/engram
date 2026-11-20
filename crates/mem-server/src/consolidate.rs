@@ -194,7 +194,7 @@ impl ControlPlane {
             Err(e) => {
                 self.db()?.execute(
                     "UPDATE consolidation_runs SET status = 'failed', error = ?2, finished_at_ms = ?3
-                     WHERE id = ?1",
+                     WHERE id = ?1 AND status = 'running'",
                     params![run_id, e.to_string(), Utc::now().timestamp_millis()],
                 )?;
                 None
@@ -207,7 +207,8 @@ impl ControlPlane {
         self.consolidation_run(run_id)
     }
 
-    /// Start plus finish on the calling thread.
+    /// Start plus finish on the calling thread (for tests and embedders; `mem admin consolidate`
+    /// runs the two steps itself to handle Ctrl-C).
     pub fn consolidate_now(
         &self,
         project: &str,
@@ -267,7 +268,8 @@ impl ControlPlane {
         self.db()?.execute(
             "UPDATE consolidation_runs SET status = ?2, source_commit = ?3, branch = ?4,
              files_in = ?5, notes_written = ?6, notes_dropped = ?7, finished_at_ms = ?8,
-             batches_failed = ?9, error = ?10, failed_paths = ?11 WHERE id = ?1",
+             batches_failed = ?9, error = ?10, failed_paths = ?11
+             WHERE id = ?1 AND status = 'running'",
             params![
                 run_id,
                 out.status.as_str(),
@@ -332,14 +334,14 @@ impl ControlPlane {
         )?)
     }
 
-    /// Marks run `run_id` failed with `reason` if it is still `running`.
-    pub fn abort_run(&self, run_id: i64, reason: &str) -> Result<(), ServerError> {
-        self.db()?.execute(
+    /// Marks run `run_id` failed with `reason` if it is still `running`; returns 1 if it was.
+    /// A run that finishes later keeps this status (its final updates require `running`).
+    pub fn abort_run(&self, run_id: i64, reason: &str) -> Result<usize, ServerError> {
+        Ok(self.db()?.execute(
             "UPDATE consolidation_runs SET status = 'failed', error = ?2, finished_at_ms = ?3
              WHERE id = ?1 AND status = 'running'",
             params![run_id, reason, Utc::now().timestamp_millis()],
-        )?;
-        Ok(())
+        )?)
     }
 
     /// `None` turns the schedule off.

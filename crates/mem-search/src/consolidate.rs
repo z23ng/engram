@@ -409,13 +409,13 @@ pub fn consolidate_retry(
     // Paths already answered by an earlier batch; a repeat would silently replace its facts.
     let mut answered: BTreeSet<VirtualPath> = BTreeSet::new();
     // `docs/x.md` for every /semantic/docs/x.md and /procedural/docs/x.md on the source commit.
-    let tier_twins: BTreeSet<String> = engine
-        .vcs()
-        .list(&rev, None)?
-        .into_iter()
-        .filter(|(p, _, _)| matches!(p.tier(), MemoryTier::Semantic | MemoryTier::Procedural))
-        .map(|(p, _, _)| without_tier(p.as_str()).to_string())
-        .collect();
+    // Notes accepted by this run are added too.
+    let mut tier_twins: BTreeSet<String> = BTreeSet::new();
+    for tier in ["/semantic", "/procedural"] {
+        for (p, _, _) in engine.vcs().list(&rev, Some(&VirtualPath::new(tier)?))? {
+            tier_twins.insert(without_tier(p.as_str()).to_string());
+        }
+    }
     let batches = batches(sources);
     let total = batches.len();
     if total == 0 {
@@ -466,6 +466,9 @@ pub fn consolidate_retry(
                 continue;
             }
             answered.insert(path.clone());
+            if current.is_none() {
+                tier_twins.insert(without_tier(path.as_str()).to_string());
+            }
             if current.as_deref() != Some(note.content.as_str()) {
                 notes.insert(path, note.content);
             }
