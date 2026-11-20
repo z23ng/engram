@@ -47,3 +47,14 @@
 2. After any change to `web/` build config or `crates/mem-server/src/web.rs` CSP, load the console in a browser and check the console for CSP errors (`grep -c 'data:font' web/dist/assets/*.css` must print 0).
 ### Relations
 - web/vite.config.ts, crates/mem-server/src/web.rs (CSP), crates/mem-server/tests/web_ui.rs
+
+## [Ollama][fake-IP-DNS][model-pull] 2026-11-20 ollama pull refuses the blob redirect because DNS returns a 198.18.x fake IP
+1. Failure Mode
+   - `ollama pull bge-m3` (v0.40.16, WSL2 behind a transparent proxy in fake-IP mode) fails with `redirect target not allowed: <id>.r2.cloudflarestorage.com resolves to non-public 198.18.4.8`.
+   - Setting `HTTPS_PROXY=http://172.24.0.1:7890` on `ollama serve` fails earlier: `pull model manifest: Get "https://registry.ollama.ai/v2/library/bge-m3/manifests/latest": EOF` (same proxy as the cargo-TLS entry).
+2. Rules
+   1. Do not route Ollama through the HTTP proxy; direct connections work through the transparent proxy.
+   2. Fetch models with curl instead: GET `https://registry.ollama.ai/v2/library/<name>/manifests/<tag>` with `Accept: application/vnd.docker.distribution.manifest.v2+json`, then each `config` and `layers` digest from `.../blobs/<digest>` (`curl -L` follows the redirect), verify sha256, store as `~/.ollama/models/blobs/sha256-<hex>`, and write the manifest last to `~/.ollama/models/manifests/registry.ollama.ai/library/<name>/<tag>`.
+   3. Confirm with `ollama list` and one real `/api/embed` or chat call.
+3. Relations
+   - Session script: scratchpad `ollama_fetch.py` (not in the repo).
