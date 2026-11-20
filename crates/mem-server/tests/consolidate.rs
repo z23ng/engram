@@ -475,3 +475,47 @@ async fn runs_left_running_by_a_stopped_server_are_marked_failed() {
         ("failed", Some("server restarted"))
     );
 }
+
+#[test]
+fn mem_serve_clears_interrupted_runs_at_startup_without_delaying_the_schedule() {
+    let f = fixture(&mock_llm(Duration::ZERO));
+    f.cp.set_consolidate_schedule("alpha", Some(168)).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let started = now - 200 * 3_600_000; // a stopped server left this run 200 h ago
+    let db = rusqlite::Connection::open(f._dir.path().join("server.db")).unwrap();
+    db.execute(
+        "INSERT INTO consolidation_runs (project, trigger, requested_by, status, started_at_ms)
+         VALUES ('alpha', 'schedule', 'root', 'running', ?1)",
+        [started],
+    )
+    .unwrap();
+    let id = db.last_insert_rowid();
+
+    let cp = f.cp.clone();
+    std::thread::spawn(move || mem_server::run_server(cp, "127.0.0.1:0"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while f.cp.consolidation_run(id).unwrap().status == "running" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run_server did not clear the row"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let run = f.cp.consolidation_run(id).unwrap();
+    assert_eq!(
+        (run.status.as_str(), run.finished_at_ms),
+        ("failed", Some(started))
+    );
+    // Still due: the scheduler (first tick at startup) starts a new run at once.
+    while f.cp.list_consolidations("alpha", 10).unwrap().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the schedule was delayed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        f.cp.list_consolidations("alpha", 10).unwrap()[0].trigger,
+        "schedule"
+    );
+}

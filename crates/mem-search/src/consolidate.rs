@@ -24,11 +24,6 @@ const PROMPT_SECTIONS_BYTES: usize = 64;
 const SOURCE_PART_BYTES: usize = 23_000;
 /// Longest label suffix: ` (part 999/999)`.
 const PART_SUFFIX_BYTES: usize = 16;
-
-/// Prompt bytes of a `\n### <label>\n` section header plus the trailing newline.
-fn header_bytes(label: &str) -> usize {
-    label.len() + 8
-}
 /// Larger related notes are left out: the LLM may rewrite a context note in full, so it must
 /// never see a truncated copy.
 const CONTEXT_NOTE_BYTES: usize = 8_000;
@@ -154,6 +149,11 @@ fn read_text(
         .map(|n| String::from_utf8_lossy(&n.content).into_owned()))
 }
 
+/// Prompt bytes of a `\n### <label>\n` section header plus the trailing newline.
+fn header_bytes(label: &str) -> usize {
+    label.len() + 8
+}
+
 /// Splits `text` at line ends into parts of at most `max` bytes (a longer line is cut at a
 /// char boundary).
 fn split_parts(text: &str, max: usize) -> Vec<String> {
@@ -194,10 +194,12 @@ fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> R
         .unwrap_or_else(|| path.as_str().rsplit('/').next().unwrap_or_default())
         .to_string();
     let hits = engine.search(&SearchRequest::new(rev.clone(), title).with_top_k(10))?;
+    let parts = split_parts(&text, SOURCE_PART_BYTES);
+    let largest = parts.iter().map(String::len).max().unwrap_or(0);
     // Bytes left for context next to the largest part and its longest label (`(part n/n)`), so
     // a batch of one source never exceeds MAX_PROMPT_CHARS, whatever the path lengths.
     let mut room = (MAX_PROMPT_CHARS - PROMPT_SECTIONS_BYTES - SYSTEM_PROMPT.len())
-        .saturating_sub(SOURCE_PART_BYTES + header_bytes(path.as_str()) + PART_SUFFIX_BYTES);
+        .saturating_sub(largest + header_bytes(path.as_str()) + PART_SUFFIX_BYTES);
     let mut context: Vec<(VirtualPath, String)> = Vec::new();
     for hit in hits {
         let related = matches!(
@@ -218,7 +220,6 @@ fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> R
             break;
         }
     }
-    let parts = split_parts(&text, SOURCE_PART_BYTES);
     let n = parts.len();
     Ok(parts
         .into_iter()

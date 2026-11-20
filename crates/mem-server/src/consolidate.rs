@@ -59,14 +59,23 @@ fn alter_ignoring_duplicate(conn: &Connection, sql: &str) -> Result<(), ServerEr
     }
 }
 
-/// Releases the one-run reservation of a project when dropped, also during a panic.
+/// Releases the one-run reservation of a project when dropped, also during a panic. A run whose
+/// row is still `running` at that point was aborted, so the row is marked `failed`.
 pub(crate) struct RunRelease<'a> {
     pub(crate) cp: &'a ControlPlane,
+    pub(crate) run_id: i64,
     pub(crate) project: &'a str,
 }
 
 impl Drop for RunRelease<'_> {
     fn drop(&mut self) {
+        if let Ok(db) = self.cp.db() {
+            let _ = db.execute(
+                "UPDATE consolidation_runs SET status = 'failed', error = 'run aborted',
+                 finished_at_ms = ?2 WHERE id = ?1 AND status = 'running'",
+                params![self.run_id, Utc::now().timestamp_millis()],
+            );
+        }
         if let Ok(mut running) = self.cp.consolidating.lock() {
             running.remove(self.project);
         }
@@ -179,7 +188,11 @@ impl ControlPlane {
         project: &str,
         key: &ApiKey,
     ) -> Result<ConsolidationRun, ServerError> {
-        let _release = RunRelease { cp: self, project };
+        let _release = RunRelease {
+            cp: self,
+            run_id,
+            project,
+        };
         let commit = match self.execute_run(run_id, project) {
             Ok(commit) => commit,
             Err(e) => {
@@ -304,17 +317,19 @@ impl ControlPlane {
         every.ok_or_else(|| ServerError::NotFound(format!("project '{project}' does not exist")))
     }
 
-    /// `None` turns the schedule off.
     /// Marks runs left `running` by a stopped server as failed; returns how many. Called once
-    /// by `mem serve` at startup (a run reservation lives only in process memory).
+    /// by `mem serve` at startup (a run reservation lives only in process memory). It assumes
+    /// that no `mem admin consolidate` run is active at that moment. `finished_at_ms` is set to
+    /// the start time, so the interrupted run does not delay the next scheduled run.
     pub fn fail_interrupted_runs(&self) -> Result<usize, ServerError> {
         Ok(self.db()?.execute(
             "UPDATE consolidation_runs SET status = 'failed', error = 'server restarted',
-             finished_at_ms = ?1 WHERE status = 'running'",
-            params![Utc::now().timestamp_millis()],
+             finished_at_ms = started_at_ms WHERE status = 'running'",
+            [],
         )?)
     }
 
+    /// `None` turns the schedule off.
     pub fn set_consolidate_schedule(
         &self,
         project: &str,
@@ -503,17 +518,23 @@ mod tests {
             ControlPlane::open(dir.path(), Box::new(MemSearchEngine::new_bm25_only)).unwrap();
         cp.create_project("alpha").unwrap();
         let cp = Arc::new(cp);
-        cp.start_consolidation("alpha", "manual", "root").unwrap();
+        let run_id = cp.start_consolidation("alpha", "manual", "root").unwrap();
         let worker = cp.clone();
         let joined = std::thread::spawn(move || {
             let _release = RunRelease {
                 cp: &worker,
+                run_id,
                 project: "alpha",
             };
             panic!("run panicked");
         })
         .join();
         assert!(joined.is_err());
+        let run = cp.consolidation_run(run_id).unwrap();
+        assert_eq!(
+            (run.status.as_str(), run.error.as_deref()),
+            ("failed", Some("run aborted"))
+        );
         assert!(
             cp.start_consolidation("alpha", "manual", "root").is_ok(),
             "not stuck at 409"

@@ -525,3 +525,32 @@ fn assert_request_sizes(bodies: &[String], min: usize) {
         assert!(total <= 48_000, "system + user = {total} bytes");
     }
 }
+
+#[test]
+fn a_short_source_keeps_all_three_context_notes() {
+    let (_d, e) = repo();
+    // 3 x (header + 7,990) = 24,306 bytes: fits next to 500 bytes, not next to 23,000.
+    let long = "payout-journal-".repeat(6);
+    write(
+        &e,
+        "/episodic/short.md",
+        &sized("Payout journal", "payout journal entry", 500),
+    );
+    for i in 0..3 {
+        write(
+            &e,
+            &format!("/semantic/{long}{i}.md"),
+            &sized(&format!("Payout journal {i}"), "payout journal rule", 7_990),
+        );
+    }
+    e.vcs().commit("main", "t", "seed").unwrap();
+    let (url, seen) = mock_llm(&notes(&[("/procedural/x.md", "# X\n\ny")]));
+    consolidate(&e, &llm(&url), None, "consolidate/short").unwrap();
+    let prompt = seen.lock().unwrap().join("\n");
+    for i in 0..3 {
+        assert!(
+            prompt.contains(&format!("{long}{i}.md")),
+            "context note {i} missing"
+        );
+    }
+}
