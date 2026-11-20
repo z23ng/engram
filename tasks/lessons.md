@@ -80,7 +80,8 @@
    1. Run Red commands so the failure is visible to the evaluator: keep the exit code (`set -o pipefail`, or no pipe) or let the output contain `N failed`.
    2. Before trusting a gate FAIL, print `_first_edit` / `_first_red` from `eval_trace.evaluate()` and check the order in the transcript.
    3. Batch independent reads (API surface, helpers, configs) into one response to raise `parallel_ratio`.
-   4. (2026-11-20, review-fix pass, commit 6dc477f) Gate again `"tdd_verdict": "FAIL"`, `"parallel_ratio": 0.11`, `"bash_code_writes": 53`: edits made with `python3 - <<'EOF'` scripts are counted as unordered code writes. Use the Edit tool for test and production changes when the gate must classify the order, and keep Bash scripts for mechanical multi-file substitutions only.
+   4. (2026-11-20, review-fix pass, commit 6dc477f) Gate again `"tdd_verdict": "FAIL"`, `"parallel_ratio": 0.11`, `"bash_code_writes": 53`. Bash script writes are report-only (`bash_code_writes`); they never set the first edit, so they did not cause the FAIL. Prefer the Edit tool anyway: only Edit/Write calls are ordered against the Red runs.
    5. Before a multi-substitution Bash edit, read the current text after `cargo fmt`: rustfmt reflowed `migrate()` and the mock reply lines, so `assert s.count(old)==1` stopped two scripts (no partial write, but one rerun each).
+   6. (2026-11-20, fixed) `guard_edit.TEST_PATTERNS` now has `(^|/)tests/.+\.rs$`, and `eval_trace.FAIL_HINT` matches `^error[E....]` and `could not compile`; `open(p, 'w')` with `p` bound to a string literal counts in `bash_code_writes`. Cases RS1, RS2, BW3 in `~/.claude/scripts/test_hooks.sh`. The same session transcript then gives `"tdd_verdict": "PASS"`, gate exit 0.
 3. Relations
-   - `~/.claude/scripts/eval_trace.py`, `~/.claude/scripts/guard_edit.py` (outside this repo)
+   - `~/.claude/scripts/eval_trace.py`, `~/.claude/scripts/guard_edit.py`, `~/.claude/scripts/test_hooks.sh` (outside this repo)
