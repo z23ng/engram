@@ -556,3 +556,32 @@ fn a_short_source_keeps_all_three_context_notes() {
         );
     }
 }
+
+#[test]
+fn a_shrinking_rewrite_and_a_note_duplicated_across_tiers_are_dropped() {
+    let (_d, e) = repo();
+    seed(&e); // /semantic/routing.md (36 bytes) is a context note of the episodic file
+    write(
+        &e,
+        "/procedural/docs/channels.md",
+        "# Channels\n\nkbz, wingpay",
+    );
+    e.vcs().commit("main", "t", "channels").unwrap();
+    let reply = notes(&[
+        ("/semantic/routing.md", "# Routing\n\nx"), // 13 bytes: removes more than half
+        ("/semantic/docs/channels.md", "# Channels\n\ncopy"), // same note in the other tier
+        (
+            "/procedural/fallback.md",
+            "# Fallback SOP\n\n1. Switch to kbz.",
+        ),
+    ]);
+    let (url, _) = mock_llm(&reply);
+    let out = consolidate(&e, &llm(&url), None, "consolidate/guards").unwrap();
+    assert_eq!((out.notes_written, out.notes_dropped), (1, 2), "{out:?}");
+    let head = Revision::BranchHead("consolidate/guards".into());
+    assert_eq!(
+        read(&e, head.clone(), "/semantic/routing.md").unwrap(),
+        "# Channel routing\n\nRoute by amount."
+    );
+    assert!(read(&e, head, "/semantic/docs/channels.md").is_none());
+}

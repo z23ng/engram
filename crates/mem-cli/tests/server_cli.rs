@@ -392,3 +392,106 @@ fn a_schedule_without_a_consolidation_llm_is_refused() {
         .0
     );
 }
+
+fn project_with_log(data: &str) {
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let db = format!("{data}/projects/alpha.db");
+    assert!(
+        mem(&[
+            "--db",
+            &db,
+            "write",
+            "/episodic/a.md",
+            "# Payout retry\n\nretry twice"
+        ])
+        .0
+    );
+    assert!(mem(&["--db", &db, "commit", "-m", "log"]).0);
+}
+
+fn consolidate_cmd(data: &str, llm: &str, extra: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mem"));
+    cmd.args([
+        "--provider",
+        "ollama",
+        "admin",
+        "consolidate",
+        "--project",
+        "alpha",
+        "--data",
+        data,
+    ])
+    .args(extra)
+    .env("MEM_LLM_BASE_URL", llm)
+    .env("MEM_LLM_MODEL", "test-llm")
+    .env("MEM_EMBEDDING_BASE_URL", "http://127.0.0.1:9");
+    cmd
+}
+
+#[test]
+fn consolidate_full_reads_every_episodic_file_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    project_with_log(data);
+    let llm = mock_llm();
+    let run = |extra: &[&str]| {
+        let out = consolidate_cmd(data, &llm, extra).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    assert!(run(&[]).contains("succeeded"));
+    assert!(run(&[]).contains("skipped"));
+    let full = run(&["--full"]);
+    assert!(
+        full.contains("succeeded") && full.contains("files 1"),
+        "{full}"
+    );
+}
+
+#[test]
+fn ctrl_c_marks_a_cli_consolidation_run_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    project_with_log(data);
+    // An LLM that accepts the request and never answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let llm = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        drop(stream);
+    });
+    let child = consolidate_cmd(data, &llm, &[])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the run reached the LLM");
+    assert!(Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success() && text.contains("interrupted"),
+        "{text}"
+    );
+    let db = rusqlite::Connection::open(format!("{data}/server.db")).unwrap();
+    let (status, error): (String, String) = db
+        .query_row(
+            "SELECT status, error FROM consolidation_runs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((status.as_str(), error.as_str()), ("failed", "interrupted"));
+}

@@ -69,13 +69,7 @@ pub(crate) struct RunRelease<'a> {
 
 impl Drop for RunRelease<'_> {
     fn drop(&mut self) {
-        if let Ok(db) = self.cp.db() {
-            let _ = db.execute(
-                "UPDATE consolidation_runs SET status = 'failed', error = 'run aborted',
-                 finished_at_ms = ?2 WHERE id = ?1 AND status = 'running'",
-                params![self.run_id, Utc::now().timestamp_millis()],
-            );
-        }
+        let _ = self.cp.abort_run(self.run_id, "run aborted");
         if let Ok(mut running) = self.cp.consolidating.lock() {
             running.remove(self.project);
         }
@@ -129,7 +123,7 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<ConsolidationRun> {
 }
 
 /// Audit identity of runs that no API key started.
-fn system_key(name: &str) -> ApiKey {
+pub fn system_key(name: &str) -> ApiKey {
     ApiKey {
         id: 0,
         name: name.into(),
@@ -182,18 +176,20 @@ impl ControlPlane {
     }
 
     /// Executes a reserved run to the end, records the result, and releases the project.
+    /// `full` reads every episodic file on `main`, not only the changes since the last run.
     pub fn finish_consolidation(
         &self,
         run_id: i64,
         project: &str,
         key: &ApiKey,
+        full: bool,
     ) -> Result<ConsolidationRun, ServerError> {
         let _release = RunRelease {
             cp: self,
             run_id,
             project,
         };
-        let commit = match self.execute_run(run_id, project) {
+        let commit = match self.execute_run(run_id, project, full) {
             Ok(commit) => commit,
             Err(e) => {
                 self.db()?.execute(
@@ -211,18 +207,24 @@ impl ControlPlane {
         self.consolidation_run(run_id)
     }
 
-    /// Start plus finish on the calling thread (`mem admin consolidate`).
+    /// Start plus finish on the calling thread.
     pub fn consolidate_now(
         &self,
         project: &str,
         key_name: &str,
+        full: bool,
     ) -> Result<ConsolidationRun, ServerError> {
         let run_id = self.start_consolidation(project, "manual", key_name)?;
-        self.finish_consolidation(run_id, project, &system_key(key_name))
+        self.finish_consolidation(run_id, project, &system_key(key_name), full)
     }
 
     /// Runs the LLM work and records the result; returns the review commit, if any.
-    fn execute_run(&self, run_id: i64, project: &str) -> Result<Option<String>, ServerError> {
+    fn execute_run(
+        &self,
+        run_id: i64,
+        project: &str,
+        full: bool,
+    ) -> Result<Option<String>, ServerError> {
         let engine = self.engine(project)?;
         // Succeeded, no_changes, and skipped runs all consumed the episodic files up to their
         // source, except the files of skipped batches, which the next run reads again.
@@ -234,7 +236,8 @@ impl ControlPlane {
                 [project],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .optional()?;
+            .optional()?
+            .filter(|_| !full);
         let (since, retry) = match last {
             Some((hex, failed)) => {
                 let failed: Vec<String> = failed
@@ -329,6 +332,16 @@ impl ControlPlane {
         )?)
     }
 
+    /// Marks run `run_id` failed with `reason` if it is still `running`.
+    pub fn abort_run(&self, run_id: i64, reason: &str) -> Result<(), ServerError> {
+        self.db()?.execute(
+            "UPDATE consolidation_runs SET status = 'failed', error = ?2, finished_at_ms = ?3
+             WHERE id = ?1 AND status = 'running'",
+            params![run_id, reason, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
     /// `None` turns the schedule off.
     pub fn set_consolidate_schedule(
         &self,
@@ -403,7 +416,7 @@ pub(crate) async fn scheduler(cp: Arc<ControlPlane>) {
             let cp = cp.clone();
             tokio::task::spawn_blocking(move || {
                 let key = system_key("system:schedule");
-                if let Err(e) = cp.finish_consolidation(run_id, &project, &key) {
+                if let Err(e) = cp.finish_consolidation(run_id, &project, &key, false) {
                     eprintln!("consolidation run {run_id} ({project}): {e}");
                 }
             });
@@ -437,7 +450,7 @@ async fn trigger(
     .await?;
     let project = name;
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = bg.finish_consolidation(run_id, &project, &key) {
+        if let Err(e) = bg.finish_consolidation(run_id, &project, &key, false) {
             eprintln!("consolidation run {run_id} ({project}): {e}");
         }
     });

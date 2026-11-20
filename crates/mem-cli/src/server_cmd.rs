@@ -14,8 +14,43 @@ type CmdResult = Result<ExitCode, String>;
 
 const ADMIN_USAGE: &str = "usage: mem admin --data <dir> (project create <slug> | project list | \
 key create --name <n> --role admin|dev|pm|bot [--projects a,b] [--expires-days N] | key list | key revoke <id> | \
-audit --project <slug> [--limit N] | reindex --project <slug> | consolidate --project <slug> | \
+audit --project <slug> [--limit N] | reindex --project <slug> | consolidate --project <slug> [--full] | \
 project schedule <slug> --every <hours|off>)";
+
+/// Removes `flag` from `args` and returns whether it was there.
+fn take_switch(args: &mut Vec<String>, flag: &str) -> bool {
+    let found = args.iter().position(|a| a == flag);
+    found.map(|i| args.remove(i)).is_some()
+}
+
+/// Runs `f` on the first Ctrl-C. The handler is registered before this returns.
+fn on_ctrl_c(f: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    let (ready_tx, ready) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => return drop(ready_tx.send(Err(e.to_string()))),
+        };
+        rt.block_on(async {
+            #[cfg(unix)]
+            let mut sig =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+                    Ok(sig) => sig,
+                    Err(e) => return drop(ready_tx.send(Err(e.to_string()))),
+                };
+            let _ = ready_tx.send(Ok(()));
+            #[cfg(unix)]
+            sig.recv().await;
+            #[cfg(not(unix))]
+            let _ = tokio::signal::ctrl_c().await;
+            f();
+        });
+    });
+    ready.recv().map_err(|e| e.to_string())?
+}
 
 /// Removes `flag value` from `args` and returns the value.
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, String> {
@@ -90,6 +125,7 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
     let project = take_flag(&mut args, "--project")?;
     let limit = take_flag(&mut args, "--limit")?;
     let every = take_flag(&mut args, "--every")?;
+    let full = take_switch(&mut args, "--full");
     let err = |e: mem_server::ServerError| e.to_string();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
@@ -167,7 +203,37 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
         }
         ["consolidate"] => {
             let project = project.ok_or("--project is required")?;
-            let run = cp.consolidate_now(&project, "cli:admin").map_err(err)?;
+            let run_id = cp
+                .start_consolidation(&project, "manual", "cli:admin")
+                .map_err(err)?;
+            // `None` = Ctrl-C: the run thread is still waiting (for the LLM), so mark the row here.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let interrupt = tx.clone();
+            on_ctrl_c(move || {
+                let _ = interrupt.send(None);
+            })?;
+            let cp = Arc::new(cp);
+            let (worker, name) = (cp.clone(), project.clone());
+            std::thread::spawn(move || {
+                let key = mem_server::system_key("cli:admin");
+                // A panic must still send a result: the Ctrl-C thread keeps the channel open.
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker.finish_consolidation(run_id, &name, &key, full)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(mem_server::ServerError::Internal(
+                        "consolidation run panicked".into(),
+                    ))
+                });
+                let _ = tx.send(Some(run));
+            });
+            let Some(run) = rx.recv().map_err(|e| e.to_string())? else {
+                cp.abort_run(run_id, "interrupted").map_err(err)?;
+                return Err(format!(
+                    "consolidate {project}: interrupted; run {run_id} marked failed"
+                ));
+            };
+            let run = run.map_err(err)?;
             println!(
                 "consolidate {project}: {} branch {} files {} notes {} dropped {}",
                 run.status,

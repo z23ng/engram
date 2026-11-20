@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 pub use audit::AuditEntry;
 pub use auth::{authorize, Action, ApiKey, Role};
-pub use consolidate::ConsolidationRun;
+pub use consolidate::{system_key, ConsolidationRun};
 pub use control::{ControlPlane, EngineFactory};
 pub use error::ServerError;
 pub use http::router;

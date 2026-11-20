@@ -149,6 +149,13 @@ fn read_text(
         .map(|n| String::from_utf8_lossy(&n.content).into_owned()))
 }
 
+/// `/semantic/docs/x.md` -> `docs/x.md`.
+fn without_tier(path: &str) -> &str {
+    path.trim_start_matches('/')
+        .split_once('/')
+        .map_or(path, |(_, rest)| rest)
+}
+
 /// Prompt bytes of a `\n### <label>\n` section header plus the trailing newline.
 fn header_bytes(label: &str) -> usize {
     label.len() + 8
@@ -401,6 +408,14 @@ pub fn consolidate_retry(
     let mut notes: BTreeMap<VirtualPath, String> = BTreeMap::new();
     // Paths already answered by an earlier batch; a repeat would silently replace its facts.
     let mut answered: BTreeSet<VirtualPath> = BTreeSet::new();
+    // `docs/x.md` for every /semantic/docs/x.md and /procedural/docs/x.md on the source commit.
+    let tier_twins: BTreeSet<String> = engine
+        .vcs()
+        .list(&rev, None)?
+        .into_iter()
+        .filter(|(p, _, _)| matches!(p.tier(), MemoryTier::Semantic | MemoryTier::Procedural))
+        .map(|(p, _, _)| without_tier(p.as_str()).to_string())
+        .collect();
     let batches = batches(sources);
     let total = batches.len();
     if total == 0 {
@@ -439,8 +454,14 @@ pub fn consolidate_retry(
             }
             let path = VirtualPath::new(&note.path)?;
             let current = read_text(engine, &rev, &path)?;
-            // Deny a repeated path, and a full rewrite of an existing note the batch never saw.
-            if answered.contains(&path) || (current.is_some() && !seen.contains(&path)) {
+            // Deny a repeated path, a full rewrite of an existing note the batch never saw, a
+            // rewrite that removes more than half of a note, and a new note that already exists
+            // in the other tier.
+            let denied = match &current {
+                Some(old) => !seen.contains(&path) || note.content.len() * 2 < old.len(),
+                None => tier_twins.contains(without_tier(path.as_str())),
+            };
+            if answered.contains(&path) || denied {
                 out.notes_dropped += 1;
                 continue;
             }

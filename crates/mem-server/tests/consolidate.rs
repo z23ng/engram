@@ -546,12 +546,38 @@ fn a_run_that_panics_inside_finish_consolidation_is_marked_aborted() {
         ControlPlane::open(dir.path(), Box::new(|_| panic!("engine open failed"))).unwrap();
     let cp = cp.with_llm_config(llm("http://127.0.0.1:9/v1"));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        cp.consolidate_now("alpha", "root")
+        cp.consolidate_now("alpha", "root", false)
     }));
     assert!(result.is_err(), "the run panicked");
     let run = &cp.list_consolidations("alpha", 1).unwrap()[0];
     assert_eq!(
         (run.status.as_str(), run.error.as_deref()),
         ("failed", Some("run aborted"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_run_reads_every_episodic_file_again() {
+    let f = fixture(&mock_llm(Duration::ZERO));
+    seed(&f).await;
+    let cp = f.cp.clone();
+    let runs = tokio::task::spawn_blocking(move || {
+        let first = cp.consolidate_now("alpha", "root", false).unwrap();
+        let again = cp.consolidate_now("alpha", "root", false).unwrap();
+        let full = cp.consolidate_now("alpha", "root", true).unwrap();
+        (first, again, full)
+    })
+    .await
+    .unwrap();
+    assert_eq!(runs.0.status, "succeeded");
+    assert_eq!(
+        (runs.1.status.as_str(), runs.1.files_in),
+        ("skipped", 0),
+        "nothing new"
+    );
+    assert_eq!(
+        (runs.2.status.as_str(), runs.2.files_in),
+        ("succeeded", 1),
+        "full re-reads"
     );
 }

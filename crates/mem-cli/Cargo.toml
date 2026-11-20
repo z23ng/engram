@@ -24,6 +24,8 @@ mem-store = { workspace = true }
 mem-vcs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
