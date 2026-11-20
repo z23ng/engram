@@ -226,10 +226,16 @@ fn serve_logs_the_search_mode_of_each_project() {
 
 /// Mock chat endpoint returning one procedural note for every request.
 fn mock_llm() -> String {
+    let notes = serde_json::json!({"notes": [{"path": "/procedural/retry.md", "content": "# Retry\n\ntwice"}]});
+    mock_llm_seq(vec![notes.to_string()])
+}
+
+/// Answers request `i` with message content `replies[i % len]`.
+fn mock_llm_seq(replies: Vec<String>) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     std::thread::spawn(move || {
-        for stream in listener.incoming() {
+        for (i, stream) in listener.incoming().enumerate() {
             let mut stream = stream.unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut len = 0usize;
@@ -244,10 +250,9 @@ fn mock_llm() -> String {
                 }
             }
             reader.read_exact(&mut vec![0; len]).unwrap();
-            let notes = serde_json::json!({"notes": [{"path": "/procedural/retry.md", "content": "# Retry\n\ntwice"}]});
+            let content = &replies[i % replies.len()];
             let resp =
-                serde_json::json!({"choices": [{"message": {"content": notes.to_string()}}]})
-                    .to_string();
+                serde_json::json!({"choices": [{"message": {"content": content}}]}).to_string();
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 resp.len()
@@ -307,5 +312,48 @@ fn admin_consolidate_and_schedule() {
     assert!(
         !mem(&["admin", "consolidate", "--data", data]).0,
         "--project is required"
+    );
+}
+
+#[test]
+fn a_partial_consolidation_exits_zero_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap();
+    assert!(mem(&["admin", "project", "create", "alpha", "--data", data]).0);
+    let db = format!("{data}/projects/alpha.db");
+    for name in ["a", "b"] {
+        let mut log = format!("# Journal {name}\n\n");
+        while log.len() < 30_000 {
+            log.push_str("payout retried after timeout.\n");
+        }
+        assert!(mem(&["--db", &db, "write", &format!("/episodic/{name}.md"), &log]).0);
+    }
+    assert!(mem(&["--db", &db, "commit", "-m", "log"]).0);
+    let good = serde_json::json!({"notes": [{"path": "/procedural/retry.md", "content": "# Retry\n\ntwice"}]});
+    let out = Command::new(env!("CARGO_BIN_EXE_mem"))
+        .args([
+            "--provider",
+            "ollama",
+            "admin",
+            "consolidate",
+            "--project",
+            "alpha",
+            "--data",
+            data,
+        ])
+        .env(
+            "MEM_LLM_BASE_URL",
+            mock_llm_seq(vec![good.to_string(), "not json".into()]),
+        )
+        .env("MEM_LLM_MODEL", "test-llm")
+        .env("MEM_EMBEDDING_BASE_URL", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "notes were committed: {text}");
+    assert!(
+        text.contains("warning: 1 batch(es) skipped") && text.contains("/episodic/b.md"),
+        "{text}"
     );
 }

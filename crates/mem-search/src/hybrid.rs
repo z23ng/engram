@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 use crate::compiler::{compile_core, CompiledCoreContext};
 use crate::config::{ConsolidateLlmConfig, SearchConfig};
 use crate::embedder::DISABLED_MODEL;
+
+/// Embedding texts per request, and the chunk budget of one write transaction.
+const EMBED_GROUP_CHUNKS: usize = 128;
+/// Blobs indexed by another model that one search re-embeds; the rest wait for later calls.
+const STALE_PER_PASS: usize = 32;
 use crate::embedder::{
     cosine_similarity_le_bytes, encode_f32_vec, EmbeddingProvider, NoopEmbedder,
 };
@@ -180,7 +185,14 @@ impl MemSearchEngine {
     }
 
     /// Indexes all uncached distinct blobs from `items`, computing embeddings outside the DB lock.
+    /// Blobs indexed by another model are re-embedded, at most [`STALE_PER_PASS`] per call, so a
+    /// model change never stalls one search; later calls catch up.
     pub fn index_unique_blobs(&self, items: &[(VirtualPath, BlobId)]) -> Result<IndexingStats> {
+        self.index_blobs(items, false)
+    }
+
+    /// `force` re-indexes every blob in `items`, fresh or not, with no per-call limit.
+    fn index_blobs(&self, items: &[(VirtualPath, BlobId)], force: bool) -> Result<IndexingStats> {
         let mut unique: BTreeMap<BlobId, VirtualPath> = BTreeMap::new();
         for (path, blob_id) in items {
             unique.entry(*blob_id).or_insert_with(|| path.clone());
@@ -195,14 +207,10 @@ impl MemSearchEngine {
         }
 
         // Step 1: Under short read lock, identify blobs missing from chunk_index and read raw bytes.
-        struct PendingBlob {
-            blob_id: BlobId,
-            parsed: ParsedWikiDocument,
-            embeddings: Option<Vec<Vec<f32>>>,
-        }
 
         let model = self.embedder.model_id();
         let mut missing_raw: Vec<(BlobId, VirtualPath, Vec<u8>)> = Vec::new();
+        let mut stale_taken = 0usize;
         self.vcs.store().with_conn(|conn| {
             let mut exists_stmt = conn
                 .prepare_cached("SELECT 1 FROM chunk_index WHERE blob_id = ?1 LIMIT 1")
@@ -212,9 +220,16 @@ impl MemSearchEngine {
                 let already_indexed = exists_stmt
                     .exists(params![blob_id.to_hex()])
                     .map_err(|e| MemError::Storage(format!("failed to check chunk_index: {e}")))?;
-                if already_indexed && index_is_fresh(conn, &blob_id.to_hex(), &model)? {
-                    stats.blobs_cache_hit += 1;
-                    continue;
+                if already_indexed && !force {
+                    if index_is_fresh(conn, &blob_id.to_hex(), &model)? {
+                        stats.blobs_cache_hit += 1;
+                        continue;
+                    }
+                    if stale_taken == STALE_PER_PASS {
+                        stats.blobs_cache_hit += 1; // re-embedded by a later call
+                        continue;
+                    }
+                    stale_taken += 1;
                 }
 
                 let Some((bytes, _ct)) = get_blob_conn(conn, &blob_id)? else {
@@ -229,36 +244,62 @@ impl MemSearchEngine {
             return Ok(stats);
         }
 
-        // Step 2: Parse Markdown and compute embeddings completely outside the SQLite lock.
-        let mut parsed_blobs: Vec<(BlobId, ParsedWikiDocument)> = Vec::new();
-        let mut all_chunk_texts: Vec<String> = Vec::new();
-        let mut chunk_counts: Vec<usize> = Vec::new();
-
+        // Step 2: Parse outside the SQLite lock, then embed and write in groups of about
+        // EMBED_GROUP_CHUNKS chunks: a slow or failed call never touches rows of other groups.
+        let mut group: Vec<(BlobId, ParsedWikiDocument)> = Vec::new();
+        let mut group_chunks = 0usize;
         for (blob_id, path, bytes) in missing_raw {
             let Ok(text) = std::str::from_utf8(&bytes) else {
                 // Skip non-UTF-8 binary blobs gracefully.
                 continue;
             };
             let parsed = parse_wiki_document(&path, text, self.config.chunk_max_chars);
-            chunk_counts.push(parsed.chunks.len());
-            for chunk in &parsed.chunks {
-                all_chunk_texts.push(chunk.chunk_text.clone());
+            if !group.is_empty() && group_chunks + parsed.chunks.len() > EMBED_GROUP_CHUNKS {
+                self.write_group(std::mem::take(&mut group), &model, force, &mut stats)?;
+                group_chunks = 0;
             }
-            parsed_blobs.push((blob_id, parsed));
+            group_chunks += parsed.chunks.len();
+            group.push((blob_id, parsed));
         }
-
-        if parsed_blobs.is_empty() {
-            return Ok(stats);
+        if !group.is_empty() {
+            self.write_group(group, &model, force, &mut stats)?;
         }
+        Ok(stats)
+    }
 
-        let flat_embeddings = if all_chunk_texts.is_empty() {
-            None
-        } else {
+    /// Embeds one group (requests of at most EMBED_GROUP_CHUNKS texts) and writes its chunk,
+    /// full-text, link, and model rows in one transaction.
+    fn write_group(
+        &self,
+        parsed_blobs: Vec<(BlobId, ParsedWikiDocument)>,
+        model: &str,
+        force: bool,
+        stats: &mut IndexingStats,
+    ) -> Result<()> {
+        struct PendingBlob {
+            blob_id: BlobId,
+            parsed: ParsedWikiDocument,
+            embeddings: Option<Vec<Vec<f32>>>,
+        }
+        let chunk_counts: Vec<usize> = parsed_blobs.iter().map(|(_, p)| p.chunks.len()).collect();
+        let all_chunk_texts: Vec<String> = parsed_blobs
+            .iter()
+            .flat_map(|(_, p)| p.chunks.iter().map(|c| c.chunk_text.clone()))
+            .collect();
+        let mut flat_embeddings: Option<Vec<Vec<f32>>> =
+            (!all_chunk_texts.is_empty()).then(|| Vec::with_capacity(all_chunk_texts.len()));
+        for texts in all_chunk_texts.chunks(EMBED_GROUP_CHUNKS) {
             self.total_embedding_calls
                 .fetch_add(1, AtomicOrdering::Relaxed);
             stats.embedding_batches_called += 1;
-            self.embedder.embed_batch(&all_chunk_texts)?
-        };
+            match self.embedder.embed_batch(texts)? {
+                Some(vecs) => flat_embeddings.get_or_insert_with(Vec::new).extend(vecs),
+                None => {
+                    flat_embeddings = None;
+                    break;
+                }
+            }
+        }
 
         let mut pending: Vec<PendingBlob> = Vec::with_capacity(parsed_blobs.len());
         let mut vec_cursor = 0usize;
@@ -308,7 +349,7 @@ impl MemSearchEngine {
                     .exists(params![hex])
                     .map_err(|e| MemError::Storage(format!("failed tx existence check: {e}")))?;
                 if already {
-                    if index_is_fresh(tx, &hex, &model)? {
+                    if !force && index_is_fresh(tx, &hex, model)? {
                         continue;
                     }
                     // Vectors from another model: drop this blob's rows, then insert them again.
@@ -430,9 +471,7 @@ impl MemSearchEngine {
             }
 
             Ok(())
-        })?;
-
-        Ok(stats)
+        })
     }
 
     /// `model_id` of the active embedder; [`DISABLED_MODEL`] means BM25-only search.
@@ -455,22 +494,24 @@ impl MemSearchEngine {
         })
     }
 
-    /// Drops the whole search index, then indexes every branch view (head plus staged changes)
-    /// with the current embedder. Blobs only in older commits are indexed again on first search.
+    /// Indexes every branch view (head plus staged changes) again with the current embedder.
+    /// Blobs only in older commits keep their rows.
     pub fn reindex_all(&self) -> Result<IndexingStats> {
-        self.vcs.store().with_tx(|tx| {
-            tx.execute_batch(
-                "DELETE FROM chunk_index; DELETE FROM fts_chunks; DELETE FROM blob_links;
-                 DELETE FROM blob_index_model;",
-            )
-            .map_err(|e| MemError::Storage(format!("failed to clear search index: {e}")))
-        })?;
+        let (_, with_vectors, _) = self.index_stats()?;
+        if self.embedder.model_id() == DISABLED_MODEL && with_vectors > 0 {
+            return Err(MemError::Storage(
+                "no embedding model is active: refusing to rebuild an index that holds vectors \
+                 (start the embedding provider, then rebuild)"
+                    .into(),
+            ));
+        }
         let mut items = Vec::new();
         for (branch, _) in self.vcs.store().list_refs()? {
             let view = self.vcs.list(&Revision::BranchWorkspace(branch), None)?;
             items.extend(view.into_iter().map(|(path, blob_id, _)| (path, blob_id)));
         }
-        self.index_unique_blobs(&items)
+        // Rows are replaced blob by blob, group by group: a failure keeps the old rows of the rest.
+        self.index_blobs(&items, true)
     }
 
     /// Executes branch-scoped hybrid search: BM25 + Vector + 1-hop Wiki Graph RRF fusion.
@@ -1434,9 +1475,27 @@ fn index_is_fresh(conn: &Connection, blob_hex: &str, model: &str) -> Result<bool
     if model == DISABLED_MODEL {
         return Ok(true);
     }
+    let err = |e: rusqlite::Error| MemError::Storage(format!("failed to read index model: {e}"));
     let stored: Option<String> = conn
         .prepare_cached("SELECT model FROM blob_index_model WHERE blob_id = ?1")
         .and_then(|mut stmt| stmt.query_row(params![blob_hex], |r| r.get(0)).optional())
-        .map_err(|e| MemError::Storage(format!("failed to read index model: {e}")))?;
-    Ok(stored.as_deref() == Some(model))
+        .map_err(err)?;
+    if stored.is_some() {
+        return Ok(stored.as_deref() == Some(model));
+    }
+    // Vectors written before blob_index_model existed: adopt them for the active model.
+    let has_vectors = conn
+        .prepare_cached(
+            "SELECT 1 FROM chunk_index WHERE blob_id = ?1 AND embedding IS NOT NULL LIMIT 1",
+        )
+        .and_then(|mut stmt| stmt.exists(params![blob_hex]))
+        .map_err(err)?;
+    if has_vectors {
+        conn.execute(
+            "INSERT OR IGNORE INTO blob_index_model (blob_id, model) VALUES (?1, ?2)",
+            params![blob_hex, model],
+        )
+        .map_err(err)?;
+    }
+    Ok(has_vectors)
 }

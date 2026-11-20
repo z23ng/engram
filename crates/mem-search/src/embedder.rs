@@ -384,7 +384,7 @@ fn http_post_json(
     let body_str = String::from_utf8(raw_body)?;
     if !(200..300).contains(&status_code) {
         return Err(MemError::Storage(format!(
-            "embedding endpoint returned HTTP {status_code}: {body_str}"
+            "HTTP {status_code} from {url}: {body_str}"
         )));
     }
     Ok(body_str)
@@ -396,38 +396,60 @@ fn https_post_via_curl(
     body: &str,
     timeout: Duration,
 ) -> Result<String> {
-    let max_time = timeout.as_secs().max(1).to_string();
-    let mut cmd = Command::new("curl");
-    cmd.arg("-sS")
-        .arg("-X")
-        .arg("POST")
-        .arg("--max-time")
-        .arg(&max_time)
-        .arg("-H")
-        .arg("Content-Type: application/json");
+    curl_post(url, api_key, body, timeout)
+}
 
+/// curl arguments and stdin. Headers and body go through `--config -` on stdin, so the API key
+/// never appears in the process arguments (readable by any local user through `ps`).
+fn curl_invocation(
+    url: &str,
+    api_key: Option<&str>,
+    body: &str,
+    timeout: Duration,
+) -> (Vec<String>, String) {
+    let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut config = format!("header = {}\n", quote("Content-Type: application/json"));
     if let Some(key) = api_key {
-        cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
+        config.push_str(&format!(
+            "header = {}\n",
+            quote(&format!("Authorization: Bearer {key}"))
+        ));
     }
+    config.push_str(&format!("data-binary = {}\n", quote(body)));
+    let args = [
+        "-sS",
+        "-X",
+        "POST",
+        "--max-time",
+        &timeout.as_secs().max(1).to_string(),
+        "--config",
+        "-",
+        "-w",
+        "\n%{http_code}",
+        url,
+    ]
+    .map(String::from)
+    .to_vec();
+    (args, config)
+}
 
-    cmd.arg("--data-binary")
-        .arg("@-")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg(url)
+fn curl_post(url: &str, api_key: Option<&str>, body: &str, timeout: Duration) -> Result<String> {
+    let (args, config) = curl_invocation(url, api_key, body, timeout);
+    let mut child = Command::new("curl")
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|e| {
-        MemError::Storage(format!(
-            "failed to spawn system 'curl' for HTTPS embedding request to '{url}': {e}"
-        ))
-    })?;
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            MemError::Storage(format!(
+                "failed to spawn system 'curl' for HTTPS request to '{url}': {e}"
+            ))
+        })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(body.as_bytes()).map_err(|e| {
-            MemError::Storage(format!("failed to pipe embedding payload to curl: {e}"))
+        stdin.write_all(config.as_bytes()).map_err(|e| {
+            MemError::Storage(format!("failed to pipe request config to curl: {e}"))
         })?;
     }
 
@@ -454,7 +476,7 @@ fn https_post_via_curl(
 
     if !(200..300).contains(&status_code) {
         return Err(MemError::Storage(format!(
-            "embedding endpoint returned HTTP {status_code}: {resp_body}"
+            "HTTP {status_code} from {url}: {resp_body}"
         )));
     }
 
@@ -566,5 +588,85 @@ fn l2_normalize(vec: &mut [f32]) {
         for v in vec.iter_mut() {
             *v *= inv;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    use super::{curl_invocation, curl_post, http_post_json};
+
+    /// One-shot HTTP server: returns the raw request and answers with `status`.
+    fn serve_once(status: &str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let status = status.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut head, mut len) = (String::new(), 0usize);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let resp =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}");
+            stream.write_all(resp.as_bytes()).unwrap();
+            head + &String::from_utf8(body).unwrap()
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn the_api_key_never_appears_in_curl_arguments() {
+        let (args, stdin) = curl_invocation(
+            "https://h/v1",
+            Some("sk-SECRET\"x"),
+            "{}",
+            Duration::from_secs(5),
+        );
+        assert!(args.iter().all(|a| !a.contains("SECRET")), "{args:?}");
+        assert!(
+            stdin.contains(r#"header = "Authorization: Bearer sk-SECRET\"x""#),
+            "{stdin}"
+        );
+    }
+
+    #[test]
+    fn curl_sends_the_config_headers_and_the_exact_body() {
+        let (url, server) = serve_once("200 OK");
+        let body = r#"{"a":"quote \" and backslash \\ and 中文"}"#;
+        assert_eq!(
+            curl_post(&url, Some("sk-test"), body, Duration::from_secs(10)).unwrap(),
+            "{}"
+        );
+        let req = server.join().unwrap();
+        assert!(req.contains("Authorization: Bearer sk-test"), "{req}");
+        assert!(req.ends_with(body), "{req}");
+    }
+
+    #[test]
+    fn http_errors_name_the_endpoint_url() {
+        let (url, server) = serve_once("500 Internal Server Error");
+        let err = http_post_json(&url, None, "{}", Duration::from_secs(5))
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        assert!(
+            err.contains(&format!("HTTP 500 from {url}")) && !err.contains("embedding endpoint"),
+            "{err}"
+        );
     }
 }

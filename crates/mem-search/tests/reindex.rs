@@ -157,3 +157,105 @@ fn reindex_all_rebuilds_every_branch_view() {
     let hits = engine(&vcs, None).search(&req).unwrap();
     assert_eq!(hits[0].path.as_str(), "/semantic/b.md");
 }
+
+/// Records the size of every `embed_batch` call; vectors from a 16-dim hash model.
+struct Counting {
+    inner: DeterministicHashEmbedder,
+    calls: std::sync::Mutex<Vec<usize>>,
+}
+
+impl mem_search::EmbeddingProvider for Counting {
+    fn provider_name(&self) -> &str {
+        "counting"
+    }
+    fn model_id(&self) -> String {
+        "counting:16".into()
+    }
+    fn embed_batch(&self, texts: &[String]) -> mem_core::Result<Option<Vec<Vec<f32>>>> {
+        self.calls.lock().unwrap().push(texts.len());
+        self.inner.embed_batch(texts)
+    }
+}
+
+fn counting() -> Arc<Counting> {
+    Arc::new(Counting {
+        inner: DeterministicHashEmbedder::new(16),
+        calls: Default::default(),
+    })
+}
+
+fn many_files(vcs: &MemVcs, n: usize) {
+    for i in 0..n {
+        write(
+            vcs,
+            "main",
+            &format!("/semantic/n{i}.md"),
+            &format!("# Note {i}\n\nrouting fact {i}"),
+        );
+    }
+    vcs.commit("main", "t", "many").unwrap();
+}
+
+#[test]
+fn embedding_requests_are_split_into_groups_of_at_most_128_chunks() {
+    let (_d, vcs) = repo();
+    many_files(&vcs, 300);
+    let emb = counting();
+    let engine = MemSearchEngine::new(vcs.clone(), emb.clone(), SearchConfig::default());
+    engine.reindex_all().unwrap();
+    let calls = emb.calls.lock().unwrap().clone();
+    assert!(
+        calls.len() >= 3 && calls.iter().all(|&n| n <= 128),
+        "{calls:?}"
+    );
+    let (chunks, with_vec, _) = index_state(&vcs);
+    assert_eq!(with_vec, chunks);
+}
+
+#[test]
+fn a_search_re_embeds_at_most_32_stale_files_and_adopts_unrecorded_vectors() {
+    let (_d, vcs) = repo();
+    many_files(&vcs, 50);
+    engine(&vcs, None)
+        .ensure_revision_indexed(&main_head(), None)
+        .unwrap();
+    let emb = counting();
+    let hybrid = MemSearchEngine::new(vcs.clone(), emb.clone(), SearchConfig::default());
+    hybrid
+        .search(&SearchRequest::new(main_head(), "routing"))
+        .unwrap();
+    let (_, with_vec, _) = index_state(&vcs);
+    assert_eq!(with_vec, 32, "one search embeds at most 32 stale files");
+    hybrid
+        .search(&SearchRequest::new(main_head(), "routing"))
+        .unwrap();
+    assert_eq!(index_state(&vcs).1, 50, "the next search catches up");
+
+    // Vectors without a model record (databases older than blob_index_model) are adopted.
+    vcs.store()
+        .with_conn(|c| Ok(c.execute("DELETE FROM blob_index_model", []).unwrap()))
+        .unwrap();
+    emb.calls.lock().unwrap().clear();
+    hybrid
+        .search(&SearchRequest::new(main_head(), "routing"))
+        .unwrap();
+    assert_eq!(
+        emb.calls.lock().unwrap().len(),
+        1,
+        "only the query is embedded"
+    );
+}
+
+#[test]
+fn reindex_without_an_active_model_refuses_to_drop_vectors() {
+    let (_d, vcs) = repo();
+    many_files(&vcs, 3);
+    engine(&vcs, Some(16)).reindex_all().unwrap();
+    let before = index_state(&vcs);
+    let err = engine(&vcs, None).reindex_all().unwrap_err();
+    assert!(
+        err.to_string().contains("no embedding model is active"),
+        "{err}"
+    );
+    assert_eq!(index_state(&vcs), before, "nothing was deleted");
+}

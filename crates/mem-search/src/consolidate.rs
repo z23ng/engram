@@ -1,7 +1,7 @@
 //! Cold-path consolidation (S6): episodic notes on `main` -> LLM -> validated
 //! `/semantic/` and `/procedural/` notes committed on a review branch. Never on the hot path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use mem_core::{
@@ -65,8 +65,10 @@ pub struct ConsolidateOutcome {
     pub commit_id: Option<CommitId>,
     /// Batches skipped because the LLM call failed or its output was unusable.
     pub batches_failed: usize,
-    /// One message per skipped batch: `batch <i> of <n>: <error>`.
+    /// One message per skipped batch: `batch <i> of <n> (<files>): <error>`.
     pub batch_errors: Vec<String>,
+    /// Episodic files of skipped batches; pass them to the next run as `retry`.
+    pub failed_paths: Vec<VirtualPath>,
 }
 
 /// Deny by default: only non-empty `.md` notes up to 256 KiB under `/semantic/` or
@@ -86,6 +88,7 @@ pub fn note_is_valid(path: &str, content: &str) -> bool {
 }
 
 struct Source {
+    path: VirtualPath,
     /// Path, plus `(part i/n)` for a split file.
     label: String,
     text: String,
@@ -145,7 +148,6 @@ fn read_text(
         .map(|n| String::from_utf8_lossy(&n.content).into_owned()))
 }
 
-/// Loads a source file and its top related semantic/procedural notes (search, no LLM).
 /// Splits `text` at line ends into parts of at most `max` bytes (a longer line is cut at a
 /// char boundary).
 fn split_parts(text: &str, max: usize) -> Vec<String> {
@@ -176,6 +178,7 @@ fn split_parts(text: &str, max: usize) -> Vec<String> {
     parts
 }
 
+/// Loads a source file (in parts) and its top related semantic/procedural notes (search, no LLM).
 fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> Result<Vec<Source>> {
     let text = read_text(engine, rev, &path)?.unwrap_or_default();
     let title = text
@@ -209,6 +212,7 @@ fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> R
         .into_iter()
         .enumerate()
         .map(|(i, text)| Source {
+            path: path.clone(),
             label: match n {
                 1 => path.as_str().to_string(),
                 _ => format!("{} (part {}/{n})", path.as_str(), i + 1),
@@ -226,7 +230,8 @@ fn batches(sources: Vec<Source>) -> Vec<Vec<Source>> {
     for s in sources {
         let fits = out.last().is_some_and(|b| {
             b.len() < MAX_FILES_PER_BATCH
-                && chars + s.chars() <= MAX_PROMPT_CHARS - PROMPT_SECTIONS_BYTES
+                && chars + s.chars()
+                    <= MAX_PROMPT_CHARS - PROMPT_SECTIONS_BYTES - SYSTEM_PROMPT.len()
         });
         if !fits {
             out.push(Vec::new());
@@ -323,6 +328,18 @@ pub fn consolidate(
     since: Option<&CommitId>,
     branch: &str,
 ) -> Result<ConsolidateOutcome> {
+    consolidate_retry(engine, cfg, since, &[], branch)
+}
+
+/// Like [`consolidate`], and also reads the `retry` files (the `failed_paths` of the previous
+/// run) when they still exist on `main`.
+pub fn consolidate_retry(
+    engine: &MemSearchEngine,
+    cfg: &ConsolidateLlmConfig,
+    since: Option<&CommitId>,
+    retry: &[VirtualPath],
+    branch: &str,
+) -> Result<ConsolidateOutcome> {
     let source_commit = engine.vcs().head_commit("main")?;
     let mut out = ConsolidateOutcome {
         status: ConsolidateStatus::Skipped,
@@ -334,8 +351,17 @@ pub fn consolidate(
         commit_id: None,
         batches_failed: 0,
         batch_errors: Vec::new(),
+        failed_paths: Vec::new(),
     };
-    let paths = episodic_paths(engine, &source_commit, since)?;
+    let rev = Revision::Commit(source_commit);
+    let mut paths: BTreeSet<VirtualPath> = episodic_paths(engine, &source_commit, since)?
+        .into_iter()
+        .collect();
+    for path in retry {
+        if path.tier() == MemoryTier::Episodic && engine.vcs().read(&rev, path)?.is_some() {
+            paths.insert(path.clone());
+        }
+    }
     if paths.is_empty() {
         return Ok(out);
     }
@@ -352,7 +378,6 @@ pub fn consolidate(
         _ => {}
     }
     out.files_in = paths.len();
-    let rev = Revision::Commit(source_commit);
     let sources = paths
         .into_iter()
         .map(|p| load_source(engine, &rev, p))
@@ -361,26 +386,53 @@ pub fn consolidate(
         .flatten()
         .collect();
     let mut notes: BTreeMap<VirtualPath, String> = BTreeMap::new();
+    // Paths already answered by an earlier batch; a repeat would silently replace its facts.
+    let mut answered: BTreeSet<VirtualPath> = BTreeSet::new();
     let batches = batches(sources);
     let total = batches.len();
+    if total == 0 {
+        // Only empty files changed: nothing to send.
+        out.status = ConsolidateStatus::NoChanges;
+        return Ok(out);
+    }
     for (i, batch) in batches.iter().enumerate() {
         // A bad batch is skipped and counted; the run fails only when every batch fails.
         let reply = match ask_llm(cfg, batch) {
             Ok(reply) => reply,
             Err(e) => {
+                let labels: Vec<&str> = batch.iter().map(|s| s.label.as_str()).collect();
                 out.batches_failed += 1;
-                out.batch_errors
-                    .push(format!("batch {} of {total}: {e}", i + 1));
+                out.batch_errors.push(format!(
+                    "batch {} of {total} ({}): {e}",
+                    i + 1,
+                    labels.join(", ")
+                ));
+                for s in batch {
+                    if !out.failed_paths.contains(&s.path) {
+                        out.failed_paths.push(s.path.clone());
+                    }
+                }
                 continue;
             }
         };
+        let seen: BTreeSet<&VirtualPath> = batch
+            .iter()
+            .flat_map(|s| s.context.iter().map(|(p, _)| p))
+            .collect();
         for note in reply {
             if !note_is_valid(&note.path, &note.content) {
                 out.notes_dropped += 1;
                 continue;
             }
             let path = VirtualPath::new(&note.path)?;
-            if read_text(engine, &rev, &path)?.as_deref() != Some(note.content.as_str()) {
+            let current = read_text(engine, &rev, &path)?;
+            // Deny a repeated path, and a full rewrite of an existing note the batch never saw.
+            if answered.contains(&path) || (current.is_some() && !seen.contains(&path)) {
+                out.notes_dropped += 1;
+                continue;
+            }
+            answered.insert(path.clone());
+            if current.as_deref() != Some(note.content.as_str()) {
                 notes.insert(path, note.content);
             }
         }

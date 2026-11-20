@@ -9,7 +9,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
-use mem_core::CommitId;
+use mem_core::{CommitId, VirtualPath};
+use mem_search::ProviderBackend;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,7 +28,8 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), ServerError> {
         "consolidation_runs",
         "batches_failed",
         "INTEGER NOT NULL DEFAULT 0",
-    )
+    )?;
+    add_column(conn, "consolidation_runs", "failed_paths", "TEXT")
 }
 
 fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<(), ServerError> {
@@ -40,9 +42,35 @@ fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Resul
         .optional()?
         .is_some();
     if !exists {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+        alter_ignoring_duplicate(
+            conn,
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+        )?;
     }
     Ok(())
+}
+
+/// `mem serve` and `mem admin` can migrate the same file at once; the slower one then sees
+/// "duplicate column name", which means the column exists.
+fn alter_ignoring_duplicate(conn: &Connection, sql: &str) -> Result<(), ServerError> {
+    match conn.execute_batch(sql) {
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        other => Ok(other?),
+    }
+}
+
+/// Releases the one-run reservation of a project when dropped, also during a panic.
+pub(crate) struct RunRelease<'a> {
+    pub(crate) cp: &'a ControlPlane,
+    pub(crate) project: &'a str,
+}
+
+impl Drop for RunRelease<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.cp.consolidating.lock() {
+            running.remove(self.project);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,13 +86,15 @@ pub struct ConsolidationRun {
     pub notes_written: i64,
     pub notes_dropped: i64,
     pub batches_failed: i64,
+    /// Episodic files of skipped batches; the next run reads them again.
+    pub failed_paths: Vec<String>,
     pub error: Option<String>,
     pub started_at_ms: i64,
     pub finished_at_ms: Option<i64>,
 }
 
 const RUN_COLUMNS: &str = "id, project, trigger, requested_by, status, source_commit, branch, \
-    files_in, notes_written, notes_dropped, error, started_at_ms, finished_at_ms, batches_failed";
+    files_in, notes_written, notes_dropped, error, started_at_ms, finished_at_ms, batches_failed, failed_paths";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<ConsolidationRun> {
     Ok(ConsolidationRun {
@@ -82,6 +112,10 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<ConsolidationRun> {
         started_at_ms: r.get(11)?,
         finished_at_ms: r.get(12)?,
         batches_failed: r.get(13)?,
+        failed_paths: r
+            .get::<_, Option<String>>(14)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -145,16 +179,21 @@ impl ControlPlane {
         project: &str,
         key: &ApiKey,
     ) -> Result<ConsolidationRun, ServerError> {
-        let result = self.execute_run(run_id, project, key);
-        if let Ok(mut running) = self.consolidating.lock() {
-            running.remove(project);
-        }
-        if let Err(e) = result {
-            self.db()?.execute(
-                "UPDATE consolidation_runs SET status = 'failed', error = ?2, finished_at_ms = ?3
-                 WHERE id = ?1",
-                params![run_id, e.to_string(), Utc::now().timestamp_millis()],
-            )?;
+        let _release = RunRelease { cp: self, project };
+        let commit = match self.execute_run(run_id, project) {
+            Ok(commit) => commit,
+            Err(e) => {
+                self.db()?.execute(
+                    "UPDATE consolidation_runs SET status = 'failed', error = ?2, finished_at_ms = ?3
+                     WHERE id = ?1",
+                    params![run_id, e.to_string(), Utc::now().timestamp_millis()],
+                )?;
+                None
+            }
+        };
+        // Every finished run is audited; an audit failure never changes the recorded result.
+        if let Err(e) = self.record_audit(key, project, "consolidate.run", commit.as_deref()) {
+            eprintln!("consolidation run {run_id} ({project}): audit failed: {e}");
         }
         self.consolidation_run(run_id)
     }
@@ -169,29 +208,50 @@ impl ControlPlane {
         self.finish_consolidation(run_id, project, &system_key(key_name))
     }
 
-    fn execute_run(&self, run_id: i64, project: &str, key: &ApiKey) -> Result<(), ServerError> {
+    /// Runs the LLM work and records the result; returns the review commit, if any.
+    fn execute_run(&self, run_id: i64, project: &str) -> Result<Option<String>, ServerError> {
         let engine = self.engine(project)?;
-        // Succeeded, no_changes, and skipped runs all consumed the episodic files up to their source.
-        let since: Option<String> = self
+        // Succeeded, no_changes, and skipped runs all consumed the episodic files up to their
+        // source, except the files of skipped batches, which the next run reads again.
+        let last: Option<(String, Option<String>)> = self
             .db()?
             .query_row(
-                "SELECT source_commit FROM consolidation_runs WHERE project = ?1
+                "SELECT source_commit, failed_paths FROM consolidation_runs WHERE project = ?1
                  AND status IN ('succeeded', 'no_changes', 'skipped') ORDER BY id DESC LIMIT 1",
                 [project],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let since = since.map(|hex| CommitId::from_hex(&hex)).transpose()?;
+        let (since, retry) = match last {
+            Some((hex, failed)) => {
+                let failed: Vec<String> = failed
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default();
+                let retry = failed
+                    .iter()
+                    .map(VirtualPath::new)
+                    .collect::<Result<Vec<_>, _>>()?;
+                (Some(CommitId::from_hex(&hex)?), retry)
+            }
+            None => (None, Vec::new()),
+        };
         let mut branch = format!("consolidate/{}", Utc::now().format("%Y%m%d-%H%M"));
         if engine.vcs().head_commit(&branch).is_ok() {
             branch = format!("{branch}-{run_id}");
         }
-        let out = mem_search::consolidate(&engine, self.llm_config(), since.as_ref(), &branch)?;
+        let out = mem_search::consolidate_retry(
+            &engine,
+            self.llm_config(),
+            since.as_ref(),
+            &retry,
+            &branch,
+        )?;
+        let failed_paths: Vec<&str> = out.failed_paths.iter().map(|p| p.as_str()).collect();
         let commit = out.commit_id.map(|c| c.to_hex());
         self.db()?.execute(
             "UPDATE consolidation_runs SET status = ?2, source_commit = ?3, branch = ?4,
              files_in = ?5, notes_written = ?6, notes_dropped = ?7, finished_at_ms = ?8,
-             batches_failed = ?9, error = ?10 WHERE id = ?1",
+             batches_failed = ?9, error = ?10, failed_paths = ?11 WHERE id = ?1",
             params![
                 run_id,
                 out.status.as_str(),
@@ -204,9 +264,10 @@ impl ControlPlane {
                 out.batches_failed as i64,
                 // Skipped batches of a run that still committed notes.
                 (!out.batch_errors.is_empty()).then(|| out.batch_errors.join("; ")),
+                (!failed_paths.is_empty()).then(|| json!(failed_paths).to_string()),
             ],
         )?;
-        self.record_audit(key, project, "consolidate.run", commit.as_deref())
+        Ok(commit)
     }
 }
 
@@ -373,22 +434,79 @@ async fn runs(
     .await
 }
 
-#[derive(Deserialize)]
-struct ScheduleBody {
-    every_hours: Option<u32>,
-}
-
 async fn schedule(
     State(cp): State<Shared>,
     Path(project): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<ScheduleBody>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, ServerError> {
+    let every_hours: Option<u32> = match body.get("every_hours") {
+        None => {
+            return Err(ServerError::BadRequest(
+                "every_hours is required (hours or null)".into(),
+            ))
+        }
+        Some(v) => serde_json::from_value(v.clone()).map_err(|_| {
+            ServerError::BadRequest("every_hours must be a positive integer or null".into())
+        })?,
+    };
     let scope = project.clone();
     guarded(cp, headers, scope, Action::Manage, move |cp, key, _| {
-        cp.set_consolidate_schedule(&project, body.every_hours)?;
+        if every_hours.is_some() && cp.llm_config().backend == ProviderBackend::Disabled {
+            return Err(ServerError::BadRequest(
+                "no consolidation LLM is configured on this server; a schedule would never run"
+                    .into(),
+            ));
+        }
+        cp.set_consolidate_schedule(&project, every_hours)?;
         cp.record_audit(key, &project, "consolidate.schedule", None)?;
-        Ok(Json(json!({ "every_hours": body.every_hours })))
+        Ok(Json(json!({ "every_hours": every_hours })))
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use mem_search::MemSearchEngine;
+    use rusqlite::Connection;
+
+    use super::{alter_ignoring_duplicate, RunRelease};
+    use crate::ControlPlane;
+
+    #[test]
+    fn a_column_added_by_another_process_is_not_an_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (a INTEGER, x INTEGER)")
+            .unwrap();
+        alter_ignoring_duplicate(&conn, "ALTER TABLE t ADD COLUMN x INTEGER").unwrap();
+        assert!(
+            alter_ignoring_duplicate(&conn, "ALTER TABLE missing ADD COLUMN x INTEGER").is_err()
+        );
+    }
+
+    #[test]
+    fn a_panicking_run_still_releases_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cp, _) =
+            ControlPlane::open(dir.path(), Box::new(MemSearchEngine::new_bm25_only)).unwrap();
+        cp.create_project("alpha").unwrap();
+        let cp = Arc::new(cp);
+        cp.start_consolidation("alpha", "manual", "root").unwrap();
+        let worker = cp.clone();
+        let joined = std::thread::spawn(move || {
+            let _release = RunRelease {
+                cp: &worker,
+                project: "alpha",
+            };
+            panic!("run panicked");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert!(
+            cp.start_consolidation("alpha", "manual", "root").is_ok(),
+            "not stuck at 409"
+        );
+    }
 }

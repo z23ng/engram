@@ -176,8 +176,13 @@ pub fn cmd_admin(opts: &GlobalOpts, args: &[String]) -> CmdResult {
                 run.notes_written,
                 run.notes_dropped
             );
-            if let Some(e) = run.error {
-                return Err(format!("consolidate {project}: failed: {e}"));
+            match run.error {
+                Some(e) if run.status == "failed" => {
+                    return Err(format!("consolidate {project}: failed: {e}"))
+                }
+                // Partial run: notes were committed; the skipped files run again next time.
+                Some(e) => eprintln!("warning: {} batch(es) skipped: {e}", run.batches_failed),
+                None => {}
             }
         }
         ["reindex"] => {

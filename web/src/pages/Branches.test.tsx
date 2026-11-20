@@ -13,7 +13,7 @@ const branches = vi.fn(async () => [
 ]);
 const run: ConsolidationRun = {
   id: 7, project: "alpha", trigger: "manual", requested_by: "root", status: "failed", source_commit: null,
-  branch: null, files_in: 2, notes_written: 0, notes_dropped: 0, error: "LLM unreachable", started_at_ms: 1, finished_at_ms: 2, batches_failed: 0,
+  branch: null, files_in: 2, notes_written: 0, notes_dropped: 0, error: "LLM unreachable", started_at_ms: 1, finished_at_ms: 2, batches_failed: 0, failed_paths: [],
 };
 const partial: ConsolidationRun = {
   ...run, id: 9, status: "succeeded", branch: "consolidate/20261120-0900", notes_written: 3, batches_failed: 1,

@@ -15,6 +15,8 @@ export type ConsolidationRun = {
   notes_written: number;
   notes_dropped: number;
   batches_failed: number;
+  /** Episodic files of skipped batches; the next run reads them again. */
+  failed_paths: string[];
   error: string | null;
   started_at_ms: number;
   finished_at_ms: number | null;

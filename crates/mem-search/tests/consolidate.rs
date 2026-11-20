@@ -7,8 +7,8 @@ use std::thread;
 
 use mem_core::{MemoryNode, Revision, VirtualPath};
 use mem_search::{
-    consolidate, note_is_valid, ConsolidateLlmConfig, ConsolidateStatus, MemSearchEngine,
-    ProviderBackend,
+    consolidate, consolidate_retry, note_is_valid, ConsolidateLlmConfig, ConsolidateStatus,
+    MemSearchEngine, ProviderBackend,
 };
 use mem_store::SqliteStore;
 use mem_vcs::{MemVcs, VersionControlEngine};
@@ -373,4 +373,120 @@ fn the_prompt_limits_notes_per_batch() {
         system.contains("at most 5 notes") && system.contains("4,000 characters"),
         "{system}"
     );
+}
+
+fn two_large_sources(e: &MemSearchEngine) {
+    for name in ["a", "b"] {
+        let mut log = format!("# Journal {name}\n\n");
+        while log.len() < 30_000 {
+            log.push_str("payout retried after timeout.\n");
+        }
+        write(e, &format!("/episodic/{name}.md"), &log);
+    }
+    e.vcs().commit("main", "t", "seed").unwrap();
+}
+
+#[test]
+fn an_empty_episodic_file_is_no_changes_without_an_llm_call() {
+    let (_d, e) = repo();
+    write(&e, "/episodic/empty.md", "");
+    e.vcs().commit("main", "t", "empty").unwrap();
+    let out = consolidate(&e, &llm("http://127.0.0.1:9/v1"), None, "consolidate/empty").unwrap();
+    assert_eq!(
+        (out.status, out.files_in, out.branch),
+        (ConsolidateStatus::NoChanges, 1, None)
+    );
+}
+
+#[test]
+fn files_of_failed_batches_are_named_and_retried_by_the_next_run() {
+    let (_d, e) = repo();
+    two_large_sources(&e);
+    let good = notes(&[("/procedural/retry.md", "# Retry\n\ntwice")]);
+    let (url, _) = mock_llm_seq(&[&good, "not json"]);
+    let out = consolidate(&e, &llm(&url), None, "consolidate/one").unwrap();
+    assert_eq!(
+        out.failed_paths,
+        vec![VirtualPath::new("/episodic/b.md").unwrap()]
+    );
+    assert!(
+        out.batch_errors[0].contains("/episodic/b.md"),
+        "{:?}",
+        out.batch_errors
+    );
+
+    let (url, seen) = mock_llm(&notes(&[("/procedural/b.md", "# B\n\nnote")]));
+    let out2 = consolidate_retry(
+        &e,
+        &llm(&url),
+        Some(&out.source_commit),
+        &out.failed_paths,
+        "consolidate/two",
+    )
+    .unwrap();
+    assert_eq!(
+        (out2.status, out2.files_in),
+        (ConsolidateStatus::Succeeded, 1)
+    );
+    let prompt = seen.lock().unwrap().join("\n");
+    assert!(
+        prompt.contains("Journal b") && !prompt.contains("Journal a"),
+        "only the failed file is retried"
+    );
+}
+
+#[test]
+fn a_repeated_path_and_a_rewrite_of_an_unseen_note_are_dropped() {
+    let (_d, e) = repo();
+    two_large_sources(&e);
+    write(
+        &e,
+        "/semantic/unrelated.md",
+        "# Office plants\n\nwater weekly",
+    );
+    e.vcs().commit("main", "t", "more").unwrap();
+    let first = notes(&[
+        ("/procedural/retry.md", "# Retry\n\nfirst"),
+        ("/semantic/unrelated.md", "# Office plants\n\nnever"),
+    ]);
+    let second = notes(&[("/procedural/retry.md", "# Retry\n\nsecond")]);
+    let (url, _) = mock_llm_seq(&[&first, &second]);
+    let out = consolidate(&e, &llm(&url), None, "consolidate/dup").unwrap();
+    assert_eq!((out.notes_written, out.notes_dropped), (1, 2), "{out:?}");
+    let head = Revision::BranchHead("consolidate/dup".into());
+    assert_eq!(
+        read(&e, head.clone(), "/procedural/retry.md").unwrap(),
+        "# Retry\n\nfirst"
+    );
+    assert_eq!(
+        read(&e, head, "/semantic/unrelated.md").unwrap(),
+        "# Office plants\n\nwater weekly"
+    );
+}
+
+#[test]
+fn the_prompt_budget_includes_the_system_prompt() {
+    let (_d, e) = repo();
+    let mut log = String::from("# Payout journal\n\n");
+    while log.len() < 23_000 {
+        log.push_str("payout journal entry.\n");
+    }
+    write(&e, "/episodic/journal.md", &log);
+    for i in 0..3 {
+        let mut note = format!("# Payout journal {i}\n\n");
+        while note.len() < 7_990 {
+            note.push_str("payout journal rule.\n");
+        }
+        write(&e, &format!("/semantic/payout-{i}.md"), &note);
+    }
+    e.vcs().commit("main", "t", "seed").unwrap();
+    let (url, seen) = mock_llm(&notes(&[("/procedural/x.md", "# X\n\ny")]));
+    consolidate(&e, &llm(&url), None, "consolidate/budget").unwrap();
+    for body in seen.lock().unwrap().iter() {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let total: usize = (0..2)
+            .map(|i| v["messages"][i]["content"].as_str().unwrap().len())
+            .sum();
+        assert!(total <= 48_000, "system + user = {total} bytes");
+    }
 }

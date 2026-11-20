@@ -31,10 +31,16 @@ fn llm(base_url: &str) -> ConsolidateLlmConfig {
 
 /// Mock chat endpoint that waits `delay` and then returns one new procedural note.
 fn mock_llm(delay: Duration) -> String {
+    let notes = json!({"notes": [{"path": "/procedural/retry.md", "content": "# Retry\n\ntwice"}]});
+    mock_llm_seq(delay, vec![notes.to_string()])
+}
+
+/// Answers request `i` with message content `replies[i % len]`.
+fn mock_llm_seq(delay: Duration, replies: Vec<String>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     std::thread::spawn(move || {
-        for stream in listener.incoming() {
+        for (i, stream) in listener.incoming().enumerate() {
             let mut stream = stream.unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut len = 0usize;
@@ -50,10 +56,8 @@ fn mock_llm(delay: Duration) -> String {
             }
             reader.read_exact(&mut vec![0; len]).unwrap();
             std::thread::sleep(delay);
-            let notes =
-                json!({"notes": [{"path": "/procedural/retry.md", "content": "# Retry\n\ntwice"}]});
-            let resp =
-                json!({"choices": [{"message": {"content": notes.to_string()}}]}).to_string();
+            let content = &replies[i % replies.len()];
+            let resp = json!({"choices": [{"message": {"content": content}}]}).to_string();
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 resp.len()
@@ -213,6 +217,13 @@ async fn a_failed_run_records_the_error_and_creates_no_branch() {
         "{run}"
     );
     assert!(run["branch"].is_null(), "{run}");
+    let audit: Vec<String> =
+        f.cp.list_audit("alpha", 10)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.operation)
+            .collect();
+    assert_eq!(audit[0], "consolidate.run", "failed runs are audited too");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -360,4 +371,94 @@ fn an_older_server_db_is_migrated() {
         assert_eq!((runs.len(), runs[0].batches_failed), (1, 0));
         cp.set_consolidate_schedule("alpha", Some(6)).unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_of_skipped_batches_are_retried_by_the_next_run() {
+    let good = json!({"notes": [{"path": "/procedural/retry.md", "content": "# Retry\n\ntwice"}]})
+        .to_string();
+    let f = fixture(&mock_llm_seq(
+        Duration::ZERO,
+        vec![good.clone(), "not json".into(), good],
+    ));
+    for name in ["a", "b"] {
+        let mut log = format!("# Journal {name}\n\n");
+        while log.len() < 30_000 {
+            log.push_str("payout retried after timeout.\n");
+        }
+        let body =
+            json!({"path": format!("/episodic/{name}.md"), "content": log, "commit_message": name});
+        assert_eq!(
+            call(
+                &f,
+                "POST",
+                "/api/v1/projects/alpha/write",
+                &f.admin,
+                Some(body)
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    call(&f, "POST", RUN, &f.admin, None).await;
+    let run = finished_run(&f).await;
+    assert_eq!(
+        (run["status"].as_str(), run["batches_failed"].as_i64()),
+        (Some("succeeded"), Some(1)),
+        "{run}"
+    );
+    assert_eq!(run["failed_paths"], json!(["/episodic/b.md"]), "{run}");
+
+    call(&f, "POST", RUN, &f.admin, None).await;
+    let run = finished_run(&f).await;
+    assert_eq!(
+        (run["status"].as_str(), run["files_in"].as_i64()),
+        (Some("succeeded"), Some(1)),
+        "{run}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_schedule_needs_an_llm_and_an_explicit_value() {
+    let f = fixture(&mock_llm(Duration::ZERO));
+    let uri = "/api/v1/projects/alpha/consolidate/schedule";
+    assert_eq!(
+        call(&f, "PUT", uri, &f.admin, Some(json!({}))).await.0,
+        StatusCode::BAD_REQUEST,
+        "missing every_hours"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let (cp, _) = ControlPlane::open(dir.path(), Box::new(MemSearchEngine::new_bm25_only)).unwrap();
+    cp.create_project("alpha").unwrap();
+    let admin = cp.create_key("root", Role::Admin, None, None).unwrap().1;
+    let cp = Arc::new(cp);
+    let off = Fixture {
+        _dir: dir,
+        app: router(cp.clone()),
+        cp,
+        admin,
+    };
+    let (s, r) = call(
+        &off,
+        "PUT",
+        uri,
+        &off.admin,
+        Some(json!({"every_hours": 24})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "no LLM configured: {r}");
+    assert_eq!(
+        call(
+            &off,
+            "PUT",
+            uri,
+            &off.admin,
+            Some(json!({"every_hours": null}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
 }

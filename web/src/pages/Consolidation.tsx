@@ -16,6 +16,12 @@ const SCHEDULES = [
 
 const TONE = { running: "accent", succeeded: "success", no_changes: "neutral", skipped: "neutral", failed: "danger" } as const;
 
+/** Polls every 2 s while a run started in the last hour is running. An older `running` row is
+ * left over from a server restart and never finishes. */
+export function pollInterval(runs: ConsolidationRun[] | undefined, now = Date.now()): number | false {
+  return runs?.some((r) => r.status === "running" && now - r.started_at_ms < 3_600_000) ? 2000 : false;
+}
+
 /** Admin-only: start an LLM consolidation run, set the schedule, list recent runs (S6). */
 export function ConsolidationPanel() {
   const { client, route, go } = useApp();
@@ -24,7 +30,7 @@ export function ConsolidationPanel() {
   const runs = useQuery({
     queryKey: ["consolidation", project],
     queryFn: () => client.consolidationRuns(project),
-    refetchInterval: (q) => (q.state.data?.runs.some((r) => r.status === "running") ? 2000 : false),
+    refetchInterval: (q) => pollInterval(q.state.data?.runs),
   });
   const refresh = () => {
     for (const k of ["consolidation", "branches"]) queries.invalidateQueries({ queryKey: [k, project] });
