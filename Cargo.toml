@@ -15,7 +15,7 @@ members = [
 exclude = ["bindings/python"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["z23ng <z23ng@users.noreply.github.com>"]

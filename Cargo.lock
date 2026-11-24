@@ -848,7 +848,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mem-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "mem-consolidate",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "mem-consolidate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "mem-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "mem-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "mem-fuse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fuser",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "mem-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mem-core",
  "mem-search",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "mem-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "mem-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "mem-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "mem-vcs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "mem-core",

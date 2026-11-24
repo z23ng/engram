@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-24
+
 ### Added
 - **`mem-mcp` & `mem-server` (`mem serve` / `mem admin`)**: Multi-project team server with SQLite control plane (`server.db`), scoped API key RBAC (`admin`, `dev`, `pm`, `bot`) with audit logging, Obsidian **WebDAV** vault sync with idle auto-commit, role-filtered Streamable HTTP MCP (`/p/{project}/mcp`), embedding-model index tracking & rebuild (`POST .../reindex`), scheduled background consolidation, and shared branch-isolated Wiki graph API (`GET /api/v1/projects/{project}/graph`).
 - **`web/` Console**: Embedded React 19 + TypeScript + Tailwind + CodeMirror 6 + interactive SVG Knowledge Graph SPA served by `mem serve` with strict CSP, light/dark themes, Cmd/Ctrl+K command palette, image attachments, and consolidation run viewer.
@@ -16,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   - Native PyO3 Python bindings (`engram.open`, `engram.open_in_memory`) enabling 5-line embedded usage plus zero-dependency `EngramClient` HTTP/SSE client.
   - Zero-dependency TypeScript SDK (`EngramClient` with `streamEvents()` SSE generator + `LocalEngram`).
 - **`mem-vcs` & `mem-cli`**: Added chronological append-only auto-merge for `/episodic/` paths under `MergeStrategy::Auto`, plus `mem consolidate`, `mem daemon`, `mem mount` CLI subcommands, updated `Dockerfile`/`docker-compose.yml`/`Makefile`, and CI SDK tests.
+
+### Fixed
+- Extracted standard Markdown relative note links alongside `[[Wikilinks]]` in `mem-search` branch-isolated graph resolution, improved Knowledge Graph constellation layout, and eliminated hover/ResizeObserver layout flicker, `pointerUp`/`click` double-toggle, cluster toggle layout resets, and label pointer-event stealing in `web/src/pages/Graph.tsx` and `crates/mem-daemon/src/ui/index.html`.
+- Synchronized `web/package-lock.json` for Node 24 / npm 11 `npm ci` compatibility, and updated `.github/workflows/release.yml` to build and embed `web/dist` in release binaries.
 
 ## [0.1.0] - 2026-11-19
 

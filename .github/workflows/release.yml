@@ -13,7 +13,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  build-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build embedded web console
+        run: npm run build
+
+      - name: Upload web dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
   build:
+    needs: build-web
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +69,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download built web console
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
 
       - name: Install Rust toolchain & target
         uses: dtolnay/rust-toolchain@stable
@@ -99,6 +135,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: release-*
           path: artifacts
           merge-multiple: true
 
