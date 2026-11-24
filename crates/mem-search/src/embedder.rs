@@ -246,7 +246,8 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
     }
 }
 
-pub(crate) fn post_json_http_or_curl(
+/// Sends an HTTP/HTTPS JSON POST request (via `TcpStream` for HTTP or `curl` for HTTPS).
+pub fn post_json_http_or_curl(
     url: &str,
     api_key: Option<&str>,
     body: &str,

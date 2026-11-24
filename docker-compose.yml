@@ -12,12 +12,22 @@ services:
       MEM_LLM_BASE_URL: ${MEM_LLM_BASE_URL:-http://ollama:11434/v1}
       MEM_LLM_MODEL: ${MEM_LLM_MODEL:-qwen2.5:7b}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MEM_DAEMON_HOST: 0.0.0.0
+      MEM_DAEMON_PORT: "7700"
+      MEM_DAEMON_TOKEN: ${MEM_DAEMON_TOKEN:-}
+    ports:
+      - "7700:7700"
     volumes:
       - mem_data:/data
     stdin_open: true
     tty: true
-    # Override entrypoint command when launching MCP over stdio or CLI diagnostics
-    command: ["doctor"]
+    # Starts HTTP REST / SSE / HTTP-SSE MCP daemon on :7700; override with `doctor` or `mcp` if desired
+    command: ["daemon", "--host", "0.0.0.0", "--port", "7700"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7700/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   # Optional local Ollama service: start with `docker compose --profile ollama up`
   ollama:

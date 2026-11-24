@@ -34,4 +34,46 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run full workspace test suite
-        run: cargo test --all-targets --locked
+        run: cargo test --workspace --all-targets --locked
+
+  sdk-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Cache Cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            bindings/python/target
+          key: ubuntu-sdk-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build mem and mem-daemon binaries
+        run: cargo build --release --locked -p mem-cli -p mem-daemon
+
+      - name: Build Python PyO3 native extension & run unit tests
+        run: |
+          cargo build --release --manifest-path bindings/python/Cargo.toml
+          cp bindings/python/target/release/lib_native.so bindings/python/python/engram/_native.so
+          PYTHONPATH=bindings/python/python MEM_DAEMON_BIN=$PWD/target/release/mem-daemon python3 -m unittest discover -s bindings/python/tests -v
+
+      - name: Run TypeScript SDK integration tests
+        run: |
+          MEM_BIN=$PWD/target/release/mem MEM_DAEMON_BIN=$PWD/target/release/mem-daemon node --test bindings/typescript/tests/sdk.test.ts

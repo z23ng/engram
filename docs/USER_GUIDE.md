@@ -164,7 +164,10 @@ mem [--db <PATH>] [--config <PATH>] [--provider ollama|openai|disabled] [--json]
 | **`mem branch [NAME]`** | • 无参数列出全部分支；<br>• 零拷贝创建新分支：`mem branch exp/redis-test --from main`；<br>• 删除分支：`mem branch -d exp/redis-test`（受保护分支 `main` 不可删除）。 |
 | **`mem diff <BASE> <TARGET>`** | 基于 Merkle Tree 子树哈希快速剪枝比对任意两个分支或 Commit 哈希。<br>`mem diff main exp/redis-test` |
 | **`mem rewind <COMMIT_ID>`** | **防污染瞬间回滚**：原子重置分支指针至目标 Commit，并彻底清空脏工作区。<br>`mem rewind 0d601d27c282... --branch main` |
-| **`mem merge <SRC> <DST>`** | 执行三路合并（支持 `--strategy auto \| ours \| theirs`，默认 `auto`）。<br>`mem merge exp/redis-test main --strategy auto` |
+| **`mem merge <SRC> <DST>`** | 执行三路合并（支持 `--strategy auto \| ours \| theirs`，默认 `auto`；`/episodic/` 支持自动追加合并）。<br>`mem merge exp/redis-test main --strategy auto` |
+| **`mem consolidate [OPTS]`** | 冷路径睡眠整理：在隔离 `consolidate/*` 分支扫描 `/episodic/` 日志，去重提炼 `/semantic/` 与 `/procedural/` 卡片并编织 `[[Wikilinks]]`。<br>`mem consolidate --auto-merge --archive --delete-branch` |
+| **`mem daemon [OPTS]`** | 启动 HTTP REST / SSE / Streamable+SSE MCP 多进程守护服务端（默认 `127.0.0.1:7700`，支持 `--token` 与 `--consolidate-interval`）。 |
+| **`mem mount <DIR> [OPTS]`** | 通过 POSIX FUSE 将分支或只读 `--commit` 挂载为本地目录，支持 `ls`/`cat`/`grep`/`mv` 直接读写（`--read-only` 可选）。 |
 | **`mem gc`** | 执行 Mark-and-Sweep（标记-清除）垃圾回收，清理被 `rewind` 或删分支孤立的 Blob/Tree/FTS5 行。 |
 
 ---
@@ -289,7 +292,7 @@ mem mcp install --client cursor
 mem mcp install --client claude-code
 ```
 
-### 5.2 暴露给 Agent 的 11 个核心 MCP Tools
+### 5.2 暴露给 Agent 的 12 个核心 MCP Tools
 
 | 工具名称 | 核心参数 | 功能描述 |
 | :--- | :--- | :--- |
@@ -304,6 +307,21 @@ mem mcp install --client claude-code
 | **`mem_rewind`** | `commit_id`, `branch?` | 原子回滚分支并丢弃未提交污染记忆 |
 | **`mem_diff`** | `base`, `target` | 结构化比对两个分支或 Commit 间的增删改差异 |
 | **`mem_merge`** | `source`, `target`, `strategy?` | 三路合并分支并自动检测层级与同路径冲突 |
+| **`mem_consolidate`** | `branch?`, `auto_merge?`, `archive_processed?`, `dry_run?`, `use_llm?` | 在隔离 `consolidate/*` 分支执行冷路径睡眠整理并可选自动合并回主干 |
+
+### 5.3 HTTP REST / SSE MCP 与 Python / TypeScript SDK 接入
+
+- **HTTP / SSE 守护进程**：运行 `mem daemon --host 127.0.0.1 --port 7700` 后，可使用 `POST /mcp`（Streamable HTTP）、`GET /mcp/sse` + `POST /mcp/messages`（SSE MCP）、`/v1/*` REST API 与 `/v1/events` SSE 实时事件流。
+- **Python SDK (`bindings/python`)**：通过 PyO3 原生嵌入式绑定实现 5 行开箱即用：
+  ```python
+  import engram
+  mem = engram.open("memory.db")
+  mem.create_branch("exp/test", from_rev="main")
+  mem.write("/semantic/tip.md", "Use SQLite WAL.", branch="exp/test")
+  hits = mem.search("WAL", branch="exp/test")
+  ```
+  远程连接 `mem-daemon` 可使用 `engram.EngramClient("http://127.0.0.1:7700")`。
+- **TypeScript SDK (`bindings/typescript`)**：通过 `@engram-memory/sdk` 提供零依赖 `EngramClient`（REST + `streamEvents()` SSE）与本地 CLI 封装 `LocalEngram`。
 
 ---
 

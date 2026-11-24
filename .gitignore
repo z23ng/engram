@@ -2,3 +2,11 @@
 **/*.db
 **/*.db-wal
 **/*.db-shm
+/bindings/python/target/
+/bindings/python/python/engram/*.so
+/bindings/python/python/engram/*.pyd
+/bindings/python/python/engram/*.dylib
+**/__pycache__/
+*.egg-info/
+/bindings/typescript/dist/
+/bindings/typescript/node_modules/

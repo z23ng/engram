@@ -83,12 +83,16 @@ curl -fsSL https://raw.githubusercontent.com/z23ng/engram/main/install.sh | sh
 
 ```mermaid
 flowchart TB
-    CLI["mem CLI / onboard / doctor"] --> VFS
-    MCP["Built-in stdio MCP Server (11 Tools)"] --> VFS
+    CLI["mem CLI / onboard / doctor / consolidate"] --> VFS
+    MCP["MCP Server: stdio · Streamable HTTP · SSE (12 Tools)"] --> VFS
     MCP --> Search
+    Daemon["mem-daemon (Axum HTTP REST + /v1/events SSE)"] --> VFS
+    SDK["Python (PyO3/HTTP) & TypeScript SDKs"] --> VFS
+    FUSE["mem-fuse (POSIX FUSE Mount)"] --> VFS
     VFS["VFS 4-Tier Namespace (/core | /semantic | /procedural | /episodic)"] --> VCS
     VCS["mem-vcs: Workspace Overlay · Merkle Tree · Zero-Copy Branch · Rewind · 3-Way Merge · GC"] --> Store
     Search["mem-search: Obsidian Wiki Parser · FTS5 BM25 · Vector Cosine · 1-Hop Graph-RRF · /core Compiler"] --> Store
+    Consolidate["mem-consolidate: Isolated consolidate/* Branch Sleep Worker"] --> VCS
     Store["mem-store: Single-File SQLite WAL (blobs[BLAKE3+zstd] · trees · commits · refs · chunk_index · fts_chunks · blob_links)"]
 ```
 
@@ -127,6 +131,11 @@ mem rewind <healthy_commit_id>
 
 # 5. 一键运行多 Agent 分支合并实战示例
 ./examples/multi_agent_branch_merge.sh
+
+# 6. 冷路径睡眠整理、HTTP Daemon 与 POSIX FUSE 挂载
+mem consolidate --auto-merge --archive --delete-branch
+mem daemon --host 127.0.0.1 --port 7700
+mem mount /tmp/engram-mnt --branch main
 ```
 
 ---
@@ -136,12 +145,16 @@ mem rewind <healthy_commit_id>
 ```text
 engram/
 ├── crates/
-│   ├── mem-core/      # 纯领域模型：VirtualPath、MemoryNode、BLAKE3 IDs、VCS 类型
-│   ├── mem-store/     # SQLite WAL 存储引擎：BLAKE3+zstd CAS、Merkle Tree、FTS5 与图谱表
-│   ├── mem-vcs/       # 版本控制内核：工作区叠加、分支、Diff、Rewind、3-Way Merge、GC
-│   ├── mem-search/    # Obsidian Wiki 解析、Ollama/OpenAI 向量、1-Hop 图谱混合检索、/core 编译
-│   └── mem-cli/       # `mem` 二进制：全量 CLI、Clack 引导向导、config、doctor 与 stdio MCP Server
-├── examples/          # 开箱即用的 Obsidian Vault 示例与多 Agent 分支合并脚本
+│   ├── mem-core/        # 纯领域模型：VirtualPath、MemoryNode、BLAKE3 IDs、VCS 类型
+│   ├── mem-store/       # SQLite WAL 存储引擎：BLAKE3+zstd CAS、Merkle Tree、FTS5 与图谱表
+│   ├── mem-vcs/         # 版本控制内核：工作区叠加、分支、Diff、Rewind、3-Way Merge、GC
+│   ├── mem-search/      # Obsidian Wiki 解析、Ollama/OpenAI 向量、1-Hop 图谱混合检索、/core 编译
+│   ├── mem-consolidate/ # 冷路径睡眠整理：在隔离 consolidate/* 分支扫描 /episodic 提炼卡片与 SOP
+│   ├── mem-daemon/      # HTTP REST / SSE / Streamable+SSE MCP 守护进程服务端
+│   ├── mem-fuse/        # POSIX FUSE 挂载适配器（支持目录直接读写与只读快照挂载）
+│   └── mem-cli/         # `mem` 二进制：全量 CLI、Clack 引导向导、config、doctor 与 stdio MCP Server
+├── bindings/            # 原生 Python (PyO3 + HTTP/SSE) 与 TypeScript (@engram-memory/sdk) SDKs
+├── examples/            # 开箱即用的 Obsidian Vault 示例、多 Agent 脚本及 Python/TS 示例
 ├── docs/              # 完整使用说明手册、架构设计、部署运维与演进路线图
 ├── install.sh         # 一行远程安装脚本 (支持预编译二进制与源码回退)
 ├── Dockerfile         # 多阶段生产容器与 docker-compose.yml

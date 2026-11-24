@@ -1,0 +1,21 @@
+{
+  "name": "@engram-memory/sdk",
+  "version": "0.2.0",
+  "description": "TypeScript SDK for Engram (mem) — HTTP REST/SSE daemon client and local SQLite wrapper",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "node --test tests/sdk.test.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT OR Apache-2.0"
+}

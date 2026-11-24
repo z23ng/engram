@@ -4,6 +4,17 @@ All notable changes to **Engram (`mem`)** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`mem-consolidate`**: Cold-path sleep consolidation engine (`ConsolidationEngine`) scanning `/episodic/` logs inside isolated `consolidate/*` branches, deduplicating (exact + Jaccard) and classifying observations into `/semantic/consolidated/*` cards and `/procedural/consolidated/*` SOPs, weaving active `[[Wikilinks]]`, optionally refining via OpenAI-compatible/Ollama LLM with deterministic fallback, archiving/decaying processed episodes, and auto-merging back to source branches.
+- **`mem-daemon`**: Async Tokio + Axum HTTP REST (`/v1/*`), filtered Server-Sent Events (`/v1/events`), Streamable HTTP MCP (`POST /mcp`), and HTTP+SSE MCP (`GET /mcp/sse` + `POST /mcp/messages`) server with Bearer token auth, background consolidation timer, and 12 MCP tools (adding `mem_consolidate`).
+- **`mem-fuse`**: LayerFS-inspired POSIX FUSE virtual filesystem adapter (`MemoryPosixFs` + Linux `fuser 0.19` pure-Rust mount) exposing branches read-write or historical commits read-only (`mem mount` / `mem-fuse`), automatically indexing written Markdown notes back into FTS5 + Wiki graph.
+- **`bindings/python` (`engram`) & `bindings/typescript` (`@engram-memory/sdk`)**:
+  - Native PyO3 Python bindings (`engram.open`, `engram.open_in_memory`) enabling 5-line embedded usage plus zero-dependency `EngramClient` HTTP/SSE client.
+  - Zero-dependency TypeScript SDK (`EngramClient` with `streamEvents()` SSE generator + `LocalEngram`).
+- **`mem-vcs` & `mem-cli`**: Added chronological append-only auto-merge for `/episodic/` paths under `MergeStrategy::Auto`, plus `mem consolidate`, `mem daemon`, `mem mount` CLI subcommands, updated `Dockerfile`/`docker-compose.yml`/`Makefile`, and CI SDK tests.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

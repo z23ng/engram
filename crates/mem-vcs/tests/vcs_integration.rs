@@ -614,3 +614,108 @@ fn concurrent_threads_on_isolated_branches_succeed_without_leakage() {
     }
 }
 
+#[test]
+fn episodic_append_only_auto_merges_while_semantic_conflicts() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let vcs = MemVcs::new(store);
+    vcs.init().unwrap();
+
+    vcs.write(
+        "main",
+        make_node(
+            "/episodic/2026-11-24.md",
+            "- 09:00 session started\n",
+            0.5,
+            vec!["log"],
+        ),
+    )
+    .unwrap();
+    vcs.write(
+        "main",
+        make_node("/semantic/policy.md", "Base policy", 0.8, vec!["policy"]),
+    )
+    .unwrap();
+    vcs.commit("main", "init", "seed base logs and semantic card")
+        .unwrap();
+
+    vcs.create_branch("agent/a", &Revision::BranchHead("main".into()))
+        .unwrap();
+    vcs.create_branch("agent/b", &Revision::BranchHead("main".into()))
+        .unwrap();
+
+    // Both branches append to the same episodic timeline log (agent/a earlier, agent/b later).
+    let mut node_a = make_node(
+        "/episodic/2026-11-24.md",
+        "- 09:00 session started\n- 09:05 agent/a ran benchmark\n",
+        0.6,
+        vec!["log", "bench"],
+    );
+    node_a.metadata.updated_at_ms = 1_700_000_100_000;
+    vcs.write("agent/a", node_a).unwrap();
+    vcs.commit("agent/a", "a", "agent a log").unwrap();
+
+    let mut node_b = make_node(
+        "/episodic/2026-11-24.md",
+        "- 09:00 session started\n- 09:10 agent/b verified sqlite wal\n",
+        0.7,
+        vec!["log", "wal"],
+    );
+    node_b.metadata.updated_at_ms = 1_700_000_200_000;
+    vcs.write("agent/b", node_b).unwrap();
+    vcs.commit("agent/b", "b", "agent b log").unwrap();
+
+    assert!(matches!(
+        vcs.merge("agent/a", "main", MergeStrategy::Auto).unwrap(),
+        MergeOutcome::FastForward(_)
+    ));
+    assert!(matches!(
+        vcs.merge("agent/b", "main", MergeStrategy::Auto).unwrap(),
+        MergeOutcome::Merged(_)
+    ));
+
+    let merged_log = vcs
+        .read(
+            &Revision::BranchHead("main".into()),
+            &vp("/episodic/2026-11-24.md"),
+        )
+        .unwrap()
+        .unwrap();
+    let text = merged_log.content_str().unwrap();
+    assert!(text.contains("- 09:00 session started"));
+    assert!(text.contains("- 09:05 agent/a ran benchmark"));
+    assert!(text.contains("- 09:10 agent/b verified sqlite wal"));
+    // Ordered chronologically by updated_at_ms (agent/a before agent/b).
+    assert!(text.find("agent/a").unwrap() < text.find("agent/b").unwrap());
+    assert!(merged_log.metadata.tags.contains(&"bench".to_string()));
+    assert!(merged_log.metadata.tags.contains(&"wal".to_string()));
+
+    // Verify /semantic/ divergent writes STILL report structured Conflict under Auto.
+    vcs.create_branch("sem/a", &Revision::BranchHead("main".into()))
+        .unwrap();
+    vcs.create_branch("sem/b", &Revision::BranchHead("main".into()))
+        .unwrap();
+
+    vcs.write(
+        "sem/a",
+        make_node("/semantic/policy.md", "Agent A policy", 0.8, vec!["policy"]),
+    )
+    .unwrap();
+    vcs.commit("sem/a", "a", "semantic edit a").unwrap();
+
+    vcs.write(
+        "sem/b",
+        make_node("/semantic/policy.md", "Agent B policy", 0.8, vec!["policy"]),
+    )
+    .unwrap();
+    vcs.commit("sem/b", "b", "semantic edit b").unwrap();
+
+    assert!(matches!(
+        vcs.merge("sem/a", "main", MergeStrategy::Auto).unwrap(),
+        MergeOutcome::FastForward(_)
+    ));
+    assert!(matches!(
+        vcs.merge("sem/b", "main", MergeStrategy::Auto).unwrap(),
+        MergeOutcome::Conflict { .. }
+    ));
+}
+

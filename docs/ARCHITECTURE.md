@@ -10,10 +10,10 @@
 flowchart TB
     subgraph Interface["接口层 (Interface Layer)"]
         CLI["mem CLI"]
-        MCP["mem-mcp Server"]
-        API["HTTP / gRPC Daemon"]
-        SDK["Python / TS / Rust SDK"]
-        FUSE["mem-fuse (Optional POSIX Mount)"]
+        MCP["MCP Server (stdio / HTTP / SSE - 12 Tools)"]
+        API["mem-daemon (Axum HTTP REST + SSE)"]
+        SDK["Python (PyO3/HTTP) & TypeScript SDKs"]
+        FUSE["mem-fuse (POSIX FUSE Mount)"]
     end
 
     subgraph VFS["命名空间与分层管理 (mem-vfs)"]
@@ -27,14 +27,14 @@ flowchart TB
         TreeBuilder["Merkle Tree Builder"]
         CommitDAG["Commit DAG & Ref Manager"]
         DiffEngine["Tree Diff Engine"]
-        Merger["Three-Way Merger"]
+        Merger["Three-Way Merger (with /episodic Append-Merge)"]
         RewindGC["Rewind & Mark-Sweep GC"]
     end
 
     subgraph Search["检索与编译引擎 (mem-search)"]
         HotCompiler["/core Hot Block Compiler (<5ms)"]
         FTS["SQLite FTS5 (BM25)"]
-        VecIdx["Vector Index (sqlite-vec / HNSW)"]
+        VecIdx["Vector Index (Cosine)"]
         RRF["Branch-Scoped RRF Reranker"]
         Ingest["Auto-Wiki Ingest Weaver (ingest.rs)"]
         Vault["Obsidian Vault Bridge (vault.rs)"]
@@ -47,8 +47,8 @@ flowchart TB
         MetaIdx["memory_metadata & index chunks"]
     end
 
-    subgraph ColdPath["后台整理进程 (mem-consolidate - Optional)"]
-        SleepWorker["Async Trajectory Consolidator"]
+    subgraph ColdPath["后台整理进程 (mem-consolidate)"]
+        SleepWorker["Isolated-Branch Trajectory Consolidator (consolidate/*)"]
     end
 
     CLI --> VFS

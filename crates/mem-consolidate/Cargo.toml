@@ -1,0 +1,24 @@
+[package]
+name = "mem-consolidate"
+description = "Cold-path isolated-branch episodic consolidation engine for Engram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+chrono = { workspace = true }
+mem-core = { workspace = true }
+mem-search = { workspace = true }
+mem-store = { workspace = true }
+mem-vcs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -60,10 +60,10 @@
   - 实现三棵树（`base` / `ours` / `theirs`）自动合并、`/episodic/` 追加合并与同路径冲突结构化报告。
 - [x] **3.2 `mem-cli` 完整命令行工具**
   - 交付完整类 Git 体验的 CLI（`onboard`, `config`, `init`, `status`, `write`, `read`, `ls`, `commit`, `log`, `branch`, `rewind`, `diff`, `merge`, `search`, `compile`, `ingest`, `vault`, `gc`, `doctor`, `completions`）。
-- [x] **3.3 内置 stdio MCP Server（11 个工具 + `mem mcp install`）**
-  - 实现标准 JSON-RPC 2.0 stdio MCP Server（暴露 `mem_read`、`mem_write`、`mem_ingest`、`mem_list`、`mem_search`、`mem_compile_core`、`mem_commit`、`mem_branch`、`mem_rewind`、`mem_diff`、`mem_merge`），并支持一键无损写入 Cursor / Claude Code / Claude Desktop / Windsurf。
-- [ ] **3.4 可选 `mem-daemon`（HTTP SSE / REST 多进程守护模式）**
-  - 提供独立 HTTP REST / SSE 守护进程，支撑多容器并发共享读写。
+- [x] **3.3 内置 stdio MCP Server（12 个工具 + `mem mcp install`）**
+  - 实现标准 JSON-RPC 2.0 stdio MCP Server（暴露 `mem_read`、`mem_write`、`mem_ingest`、`mem_list`、`mem_search`、`mem_compile_core`、`mem_commit`、`mem_branch`、`mem_rewind`、`mem_diff`、`mem_merge`、`mem_consolidate`），并支持一键无损写入 Cursor / Claude Code / Claude Desktop / Windsurf。
+- [x] **3.4 `mem-daemon`（HTTP REST / SSE / HTTP+SSE MCP 多进程守护模式）**
+  - 提供独立 HTTP REST / SSE / Streamable MCP 守护进程（`mem daemon` / `mem-daemon`），支持 Bearer Token 鉴权、实时分支过滤事件流 `/v1/events` 与定时后台整理。
 
 ### 验收标准（Exit Criteria）
 1. 能够模拟两个并发 Subagent 在各自独立分支修改不同记忆路径后，无损三路合并回 `main`；修改同一路径时准确检出冲突并保留双侧版本供决策。
@@ -76,12 +76,12 @@
 **阶段目标**：打通主流 AI 开发语言 SDK、可选的 LayerFS 风格 POSIX 目录挂载以及冷路径自动记忆整理能力。
 
 ### 核心任务
-- [ ] **4.1 Python / TypeScript 原生 SDK**
-  - 基于 PyO3（Python）或 HTTP Client 提供极简 SDK，方便 LangGraph / CrewAI / 自研 Agent 框架集成。
-- [ ] **4.2 `mem-fuse`（可选 POSIX 挂载视图）**
-  - 基于 `fuser` 将指定 Memory Branch 挂载为本地目录，实现用标准 `ls` / `cat` / `grep` / `vim` 检查和编辑记忆节点，写入后自动映射回 Working Workspace。
-- [ ] **4.3 `mem-consolidate`（后台“睡眠整理”工作流）**
-  - 实现异步整理接口：自动在独立 `consolidate/*` 分支扫描近期 `/episodic/` 轨迹日志，去重压缩并提炼 `/semantic/` 事实与 `/procedural/` SOP，通过后自动 Merge 回 `main`。
+- [x] **4.1 Python / TypeScript 原生 SDK**
+  - 基于 PyO3（Python 原生扩展 `engram.open` + `EngramClient` HTTP/SSE 客户端）与零依赖 TypeScript SDK（`@engram-memory/sdk`，提供 `EngramClient` 与本地 `LocalEngram`），方便 LangGraph / CrewAI / 自研 Agent 框架集成。
+- [x] **4.2 `mem-fuse`（POSIX FUSE 挂载视图）**
+  - 基于 `fuser` 将指定 Memory Branch 或只读历史 Commit 挂载为本地 POSIX 目录（`mem mount` / `mem-fuse`），支持标准 `ls` / `cat` / `grep` / `echo` / `mv` / `mkdir` 检查和编辑记忆节点，写入后自动映射回 Working Workspace 并即时建索引。
+- [x] **4.3 `mem-consolidate`（后台“睡眠整理”工作流）**
+  - 实现冷路径整理引擎（`mem consolidate` / MCP `mem_consolidate`）：在独立 `consolidate/*` 分支扫描 `/episodic/` 轨迹日志，去重压缩并提炼 `/semantic/` 事实卡片与 `/procedural/` SOP，自动编织 `[[Wikilinks]]`，支持 `diff` 审查、归档衰减与自动三路合并回 `main`。
 
 ### 验收标准（Exit Criteria）
 1. Python Agent 脚本可通过 `import engram` 在 5 行代码内完成本地记忆库初始化、分支创建与上下文检索。

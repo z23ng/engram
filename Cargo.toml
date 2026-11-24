@@ -5,8 +5,12 @@ members = [
     "crates/mem-store",
     "crates/mem-vcs",
     "crates/mem-search",
+    "crates/mem-consolidate",
+    "crates/mem-daemon",
+    "crates/mem-fuse",
     "crates/mem-cli",
 ]
+exclude = ["bindings/python"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,7 +32,18 @@ thiserror = "2.0"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mem-core = { path = "crates/mem-core" }
 mem-store = { path = "crates/mem-store" }
 mem-vcs = { path = "crates/mem-vcs" }
 mem-search = { path = "crates/mem-search" }
+mem-consolidate = { path = "crates/mem-consolidate" }
+mem-daemon = { path = "crates/mem-daemon" }
+mem-fuse = { path = "crates/mem-fuse" }

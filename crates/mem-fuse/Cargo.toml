@@ -1,0 +1,40 @@
+[package]
+name = "mem-fuse"
+description = "Optional LayerFS-style POSIX FUSE virtual filesystem adapter for Engram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "mem-fuse"
+path = "src/main.rs"
+
+[features]
+default = []
+macos-fuse = ["fuser"]
+
+[dependencies]
+chrono = { workspace = true }
+mem-core = { workspace = true }
+mem-search = { workspace = true }
+mem-store = { workspace = true }
+mem-vcs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = "0.19"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { version = "0.19", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

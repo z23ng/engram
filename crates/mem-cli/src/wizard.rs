@@ -1065,7 +1065,7 @@ pub fn cmd_completions(args: &[String]) -> Result<ExitCode, String> {
     local cur prev cmds
     cur="${{COMP_WORDS[COMP_CWORD]}}"
     prev="${{COMP_WORDS[COMP_CWORD-1]}}"
-    cmds="onboard setup config init status write read ls commit log branch rewind diff merge search compile ingest vault gc doctor mcp completions"
+    cmds="onboard setup config init status write read ls commit log branch rewind diff merge search compile ingest vault consolidate daemon mount gc doctor mcp completions"
     if [[ ${{COMP_CWORD}} -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
         return 0
@@ -1105,6 +1105,9 @@ _mem() {{
     'compile:Compile /core prompt context (<5ms)'
     'ingest:Structure PM/Dev/Bot rough notes with auto-[[Wikilinks]]'
     'vault:Obsidian Vault bridge (init-template/import/sync/export)'
+    'consolidate:Distill episodic logs in an isolated consolidate/* branch'
+    'daemon:Start HTTP REST, SSE, and HTTP/SSE MCP server'
+    'mount:Mount branch or commit as a POSIX FUSE filesystem'
     'gc:Garbage collect unreachable blobs/trees'
     'doctor:Health diagnostics'
     'mcp:Start stdio MCP server or install into AI clients'
@@ -1116,7 +1119,7 @@ _mem "$@"
 "#
         ),
         "fish" => print!(
-            r#"set -l cmds onboard setup config init status write read ls commit log branch rewind diff merge search compile ingest vault gc doctor mcp completions
+            r#"set -l cmds onboard setup config init status write read ls commit log branch rewind diff merge search compile ingest vault consolidate daemon mount gc doctor mcp completions
 complete -c mem -f -n "not __fish_seen_subcommand_from $cmds" -a "$cmds"
 complete -c mem -f -n "__fish_seen_subcommand_from config" -a "show use"
 complete -c mem -f -n "__fish_seen_subcommand_from use" -a "ollama openai lite"

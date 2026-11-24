@@ -83,12 +83,19 @@ mem vault export ./team-vault --branch main
 
 ---
 
-## 5. Docker 容器化部署（可选）
+## 5. `mem-daemon` 服务与 Docker 容器化部署
 
-对于习惯容器化运维的服务器，可直接复用仓库内置的 [Dockerfile](../Dockerfile) 与 [docker-compose.yml](../docker-compose.yml)：
+对于需要多进程/多容器并发共享同一记忆库、SSE 事件订阅或远程 HTTP MCP 接入的场景，可启动独立守护进程 `mem daemon`（或 `mem-daemon`）：
 
 ```bash
-# 仅启动单文件 mem 容器（Lite 或对接生产 OpenAI）
+# 本地或服务器启动 HTTP REST / SSE / MCP Daemon（默认端口 7700，支持 Bearer 鉴权与定时整理）
+mem daemon --host 0.0.0.0 --port 7700 --token "$MEM_DAEMON_TOKEN" --consolidate-interval 3600 --consolidate-auto-merge
+```
+
+对于习惯容器化运维的服务器，可直接复用仓库内置的 [Dockerfile](../Dockerfile) 与 [docker-compose.yml](../docker-compose.yml)（默认即以 `mem daemon` 启动并暴露 `7700` 端口）：
+
+```bash
+# 启动 mem-daemon 容器（Lite 或对接生产 OpenAI）
 MEM_PROVIDER=openai OPENAI_API_KEY=sk-... docker compose up --build
 
 # 同时拉起本地 Ollama 容器

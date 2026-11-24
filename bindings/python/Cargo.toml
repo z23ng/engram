@@ -1,0 +1,21 @@
+[package]
+name = "engram-py"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Native PyO3 Python bindings for the Engram (mem) versioned AI memory engine"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+chrono = "0.4"
+mem-consolidate = { path = "../../crates/mem-consolidate" }
+mem-core = { path = "../../crates/mem-core" }
+mem-search = { path = "../../crates/mem-search" }
+mem-store = { path = "../../crates/mem-store" }
+mem-vcs = { path = "../../crates/mem-vcs" }
+pyo3 = { version = "0.30", features = ["extension-module"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

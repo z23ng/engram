@@ -161,7 +161,8 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
         }),
     );
     let tools = tools_resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
+    assert!(tools.iter().any(|t| t["name"] == "mem_consolidate"));
 
     let write_resp = send_and_read(
         &mut stdin,
@@ -246,6 +247,48 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
         .unwrap()
         .iter()
         .any(|v| v == "MCP Note"));
+
+    // Call mem_consolidate over stdio MCP on an episodic note.
+    let ep_write = send_and_read(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "mem_write",
+                "arguments": {
+                    "path": "/episodic/mcp-session.md",
+                    "content": "- Observed MCP_ALIAS requires WAL busy_timeout=5000.",
+                    "tags": ["episodic", "sqlite"]
+                }
+            }
+        }),
+    );
+    assert_eq!(ep_write["result"]["isError"], false);
+
+    let cons_resp = send_and_read(
+        &mut stdin,
+        &mut reader,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "mem_consolidate",
+                "arguments": {
+                    "branch": "main",
+                    "dry_run": true
+                }
+            }
+        }),
+    );
+    assert_eq!(cons_resp["result"]["isError"], false);
+    let cons_payload: Value =
+        serde_json::from_str(cons_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(cons_payload["episodes_scanned"], 1);
+    assert!(!cons_payload["distilled_cards"].as_array().unwrap().is_empty());
 
     drop(stdin);
     let status = child.wait().unwrap();
@@ -452,4 +495,57 @@ fn cli_collaborative_ingest_and_vault_sync_export() {
     assert!(export_dir
         .join("semantic/product/payment-retry-rule.md")
         .exists());
+}
+
+#[test]
+fn cli_consolidate_isolated_branch_and_auto_merge() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("consolidate_cli.db");
+    let db_str = db_path.to_string_lossy().to_string();
+
+    let run = |args: &[&str]| -> Value {
+        let mut full = vec!["--db", &db_str, "--provider", "disabled", "--json"];
+        full.extend_from_slice(args);
+        let out = Command::new(mem_bin())
+            .args(&full)
+            .output()
+            .expect("spawn mem binary");
+        assert!(
+            out.status.success(),
+            "mem {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("valid json output")
+    };
+
+    run(&["init"]);
+    run(&[
+        "write",
+        "/episodic/e1.md",
+        "- Always set PRAGMA busy_timeout = 5000 on SQLite connections.",
+        "--tags",
+        "episodic,sqlite",
+    ]);
+    run(&["commit", "-m", "seed episodic"]);
+
+    // 1. Isolated consolidate/* branch leaves main untouched.
+    let isolated = run(&["consolidate"]);
+    let cons_branch = isolated["consolidation_branch"].as_str().unwrap().to_string();
+    assert!(cons_branch.starts_with("consolidate/"));
+    assert_eq!(isolated["episodes_scanned"], 1);
+    let main_list = run(&["ls", "--branch", "main"]).as_array().unwrap().clone();
+    assert_eq!(main_list.len(), 1);
+
+    // 2. Auto-merge + archive promotes distilled cards to main and archives source episode.
+    let merged = run(&[
+        "consolidate",
+        "--auto-merge",
+        "--archive",
+        "--delete-branch",
+    ]);
+    assert_eq!(merged["consolidation_branch_deleted"], true);
+    let after_list = run(&["ls", "--branch", "main"]).as_array().unwrap().clone();
+    assert!(after_list.len() >= 3);
 }

@@ -13,10 +13,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mem_consolidate::{ConsolidationEngine, ConsolidationMergeStatus, ConsolidationRequest};
 use mem_core::{
     CommitId, DiffKind, MemError, MemoryMetadata, MemoryNode, MemoryTier, MergeOutcome,
     MergeStrategy, Result, Revision, VirtualPath,
 };
+use mem_daemon::DaemonConfig;
+use mem_fuse::{mount_blocking, MemoryPosixFs, MountConfig, MountMode};
 use mem_search::{
     compile_core, export_vault, init_vault_template, parse_wiki_document, ConsolidateLlmConfig,
     EmbeddingProviderConfig, IngestRequest, IngestRole, MemSearchEngine, OpenAiCompatibleEmbedder,
@@ -199,6 +202,9 @@ fn run() -> std::result::Result<ExitCode, String> {
         "compile" => cmd_compile(&opts, args),
         "ingest" => cmd_ingest(&opts, args),
         "vault" => cmd_vault(&opts, args),
+        "consolidate" => cmd_consolidate(&opts, args),
+        "daemon" => cmd_daemon(&opts, args),
+        "mount" => cmd_mount(&opts, args),
         "gc" => cmd_gc(&opts),
         "doctor" => cmd_doctor(&opts),
         "mcp" => match args.first().map(String::as_str) {
@@ -1685,6 +1691,358 @@ fn cmd_vault_export(opts: &GlobalOpts, args: &[String]) -> std::result::Result<E
     Ok(ExitCode::SUCCESS)
 }
 
+fn cmd_consolidate(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
+    let mut branch = "main".to_string();
+    let mut consolidation_branch: Option<String> = None;
+    let mut prefix: Option<VirtualPath> = None;
+    let mut since_ms: Option<i64> = None;
+    let mut max_notes: Option<usize> = None;
+    let mut min_importance: Option<f32> = None;
+    let mut use_llm = false;
+    let mut strict_llm = false;
+    let mut auto_merge = false;
+    let mut strategy = MergeStrategy::Auto;
+    let mut delete_branch = false;
+    let mut archive_processed = false;
+    let mut decay_factor: Option<f32> = None;
+    let mut dry_run = false;
+    let mut author: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--branch" | "-b" => {
+                i += 1;
+                branch = args.get(i).ok_or("--branch requires a name")?.clone();
+            }
+            "--branch-name" => {
+                i += 1;
+                consolidation_branch =
+                    Some(args.get(i).ok_or("--branch-name requires a name")?.clone());
+            }
+            "--prefix" | "-p" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--prefix requires a virtual path")?;
+                prefix = Some(VirtualPath::new(raw).map_err(|e| e.to_string())?);
+            }
+            "--since" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--since requires Unix ms")?;
+                since_ms = Some(
+                    raw.parse::<i64>()
+                        .map_err(|_| format!("invalid --since '{raw}'"))?,
+                );
+            }
+            "--max-notes" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--max-notes requires an integer")?;
+                max_notes = Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| format!("invalid --max-notes '{raw}'"))?,
+                );
+            }
+            "--min-importance" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or("--min-importance requires a float in [0,1]")?;
+                min_importance = Some(
+                    raw.parse::<f32>()
+                        .map_err(|_| format!("invalid --min-importance '{raw}'"))?,
+                );
+            }
+            "--llm" => use_llm = true,
+            "--strict-llm" => {
+                use_llm = true;
+                strict_llm = true;
+            }
+            "--auto-merge" => auto_merge = true,
+            "--strategy" | "-s" => {
+                i += 1;
+                let s = args.get(i).ok_or("--strategy requires auto|ours|theirs")?;
+                strategy = match s.as_str() {
+                    "auto" => MergeStrategy::Auto,
+                    "ours" => MergeStrategy::Ours,
+                    "theirs" => MergeStrategy::Theirs,
+                    _ => return Err(format!("invalid merge strategy '{s}'")),
+                };
+            }
+            "--delete-branch" => delete_branch = true,
+            "--archive" => archive_processed = true,
+            "--decay" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--decay requires a float in (0,1]")?;
+                decay_factor = Some(
+                    raw.parse::<f32>()
+                        .map_err(|_| format!("invalid --decay '{raw}'"))?,
+                );
+            }
+            "--dry-run" => dry_run = true,
+            "--author" => {
+                i += 1;
+                author = Some(args.get(i).ok_or("--author requires a name")?.clone());
+            }
+            other => return Err(format!("unexpected argument '{other}' in consolidate")),
+        }
+        i += 1;
+    }
+
+    let (_, vcs) = open_existing_vcs(&opts.db_path)?;
+    let emb_cfg = opts.embedding_config();
+    let llm_cfg = opts.consolidate_config();
+    let (engine, notice) = build_search_engine(vcs, &emb_cfg);
+    if let Some(msg) = notice {
+        if !opts.json {
+            eprintln!("note: {msg}");
+        }
+    }
+
+    let mut req = ConsolidationRequest::new(&branch)
+        .with_use_llm(use_llm)
+        .with_strict_llm(strict_llm)
+        .with_auto_merge(auto_merge)
+        .with_merge_strategy(strategy)
+        .with_delete_branch_on_merge(delete_branch)
+        .with_archive_processed(archive_processed)
+        .with_dry_run(dry_run);
+    if let Some(cb) = consolidation_branch {
+        req = req.with_consolidation_branch(cb);
+    }
+    if let Some(p) = prefix {
+        req = req.with_episodic_prefix(p);
+    }
+    if let Some(s) = since_ms {
+        req = req.with_since_ms(s);
+    }
+    if let Some(m) = max_notes {
+        req = req.with_max_notes(m);
+    }
+    if let Some(mi) = min_importance {
+        req = req.with_min_importance(mi);
+    }
+    if let Some(d) = decay_factor {
+        req = req.with_decay_factor(d);
+    }
+    if let Some(a) = author {
+        req.author = a;
+    }
+
+    let report = ConsolidationEngine::new(engine)
+        .with_llm_config(llm_cfg)
+        .consolidate(&req)
+        .map_err(|e| e.to_string())?;
+
+    let is_conflict = matches!(
+        report.merge_status,
+        ConsolidationMergeStatus::Conflict { .. }
+    );
+
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else if report.episodes_scanned == 0 {
+        println!("No eligible /episodic/ logs found on '{}'.", report.source_branch);
+    } else {
+        let mode_label = if report.dry_run {
+            "Dry-Run Preview"
+        } else {
+            "Consolidated"
+        };
+        println!(
+            "{} {} episodic log(s) -> {} distilled card(s)",
+            paint(opts.use_color, "32;1", mode_label),
+            report.episodes_scanned,
+            report.distilled_cards.len(),
+        );
+        if let Some(ref b) = report.consolidation_branch {
+            println!("  branch : {b}");
+        }
+        if let Some(cid) = report.commit_id {
+            println!("  commit : {}", &cid.to_hex()[..12]);
+        }
+        if let Some(ref reason) = report.llm_fallback_reason {
+            println!("  note   : LLM fallback ({reason})");
+        }
+        for card in &report.distilled_cards {
+            println!("  - [{}] {} ({})", card.tier, card.title, card.path);
+        }
+        match &report.merge_status {
+            ConsolidationMergeStatus::Skipped => {
+                if let Some(ref b) = report.consolidation_branch {
+                    println!(
+                        "  review : mem diff {} {} && mem merge {} {}",
+                        report.source_branch, b, b, report.source_branch
+                    );
+                }
+            }
+            ConsolidationMergeStatus::FastForward { commit_id }
+            | ConsolidationMergeStatus::Merged { commit_id } => {
+                println!(
+                    "  merged : '{}' -> {}",
+                    report.source_branch,
+                    &commit_id.to_hex()[..12]
+                );
+            }
+            ConsolidationMergeStatus::Conflict { conflicts, .. } => {
+                println!(
+                    "  {} auto-merge hit {} conflict(s); branch '{}' kept for manual resolution.",
+                    paint(opts.use_color, "31;1", "CONFLICT"),
+                    conflicts.len(),
+                    report.consolidation_branch.as_deref().unwrap_or("consolidate")
+                );
+            }
+        }
+    }
+
+    if is_conflict {
+        Ok(ExitCode::from(2))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+fn cmd_daemon(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
+    let mut cfg = DaemonConfig {
+        host: env::var("MEM_DAEMON_HOST")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
+        port: env::var("MEM_DAEMON_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7700),
+        db_path: opts.db_path.clone(),
+        embedding: opts.embedding_config(),
+        consolidate_llm: opts.consolidate_config(),
+        auth_token: env::var("MEM_DAEMON_TOKEN")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
+        consolidate_interval_secs: None,
+        consolidate_auto_merge: false,
+    };
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                i += 1;
+                cfg.host = args.get(i).ok_or("--host requires an address")?.clone();
+            }
+            "--port" | "-p" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--port requires a port number")?;
+                cfg.port = raw.parse().map_err(|_| format!("invalid port '{raw}'"))?;
+            }
+            "--token" => {
+                i += 1;
+                cfg.auth_token = Some(args.get(i).ok_or("--token requires a secret")?.clone());
+            }
+            "--consolidate-interval" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or("--consolidate-interval requires seconds")?;
+                cfg.consolidate_interval_secs = Some(
+                    raw.parse::<u64>()
+                        .map_err(|_| format!("invalid --consolidate-interval '{raw}'"))?,
+                );
+            }
+            "--consolidate-auto-merge" => {
+                cfg.consolidate_auto_merge = true;
+            }
+            other => return Err(format!("unexpected argument '{other}' in daemon")),
+        }
+        i += 1;
+    }
+
+    println!(
+        "{} http://{}:{} (db: {}, auth: {})",
+        paint(opts.use_color, "32;1", "Listening"),
+        cfg.host,
+        cfg.port,
+        cfg.db_path.display(),
+        if cfg.auth_token.is_some() { "bearer" } else { "open" }
+    );
+    println!("  REST API : /v1/*   |   SSE : /v1/events   |   MCP : POST /mcp & GET /mcp/sse");
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to start tokio runtime: {e}"))?;
+    rt.block_on(mem_daemon::serve(cfg))
+        .map_err(|e| e.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_mount(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCode, String> {
+    let mut branch = "main".to_string();
+    let mut commit_hex: Option<String> = None;
+    let mut read_only = false;
+    let mut mountpoint: Option<PathBuf> = None;
+    let mut i = 0usize;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--branch" | "-b" => {
+                i += 1;
+                branch = args.get(i).ok_or("--branch requires a name")?.clone();
+            }
+            "--commit" | "-c" => {
+                i += 1;
+                commit_hex = Some(args.get(i).ok_or("--commit requires a commit hash")?.clone());
+            }
+            "--read-only" | "--ro" => {
+                read_only = true;
+            }
+            other => {
+                if mountpoint.is_none() {
+                    mountpoint = Some(PathBuf::from(other));
+                } else {
+                    return Err(format!("unexpected argument '{other}' in mount"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let target_dir = mountpoint
+        .ok_or("usage: mem mount <MOUNTPOINT> [--branch <b> | --commit <cid>] [--read-only]")?;
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("failed to create mountpoint '{}': {e}", target_dir.display()))?;
+
+    let (_, vcs) = open_existing_vcs(&opts.db_path)?;
+    let emb_cfg = opts.embedding_config();
+    let (engine, notice) = build_search_engine(vcs, &emb_cfg);
+    if let Some(msg) = notice {
+        eprintln!("note: {msg}");
+    }
+
+    let cfg = if let Some(cid_raw) = commit_hex {
+        let cid = CommitId::from_hex(&cid_raw).map_err(|e| e.to_string())?;
+        MountConfig::read_only(Revision::Commit(cid))
+    } else if read_only {
+        MountConfig::read_only(Revision::BranchWorkspace(branch))
+    } else {
+        let mut c = MountConfig::branch_rw(branch);
+        c.mode = MountMode::ReadWrite;
+        c
+    };
+
+    let mode_str = if cfg.effective_mode() == MountMode::ReadOnly {
+        "read-only"
+    } else {
+        "read-write"
+    };
+    let posix_fs = MemoryPosixFs::new(engine, cfg).map_err(|e| e.to_string())?;
+    println!(
+        "{} {} ({mode_str}) — press Ctrl-C or run 'fusermount -u {}' to unmount",
+        paint(opts.use_color, "32;1", "Mounted"),
+        target_dir.display(),
+        target_dir.display()
+    );
+    mount_blocking(posix_fs, &target_dir).map_err(|e| format!("FUSE mount failed: {e}"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_gc(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
     let (_, vcs) = open_existing_vcs(&opts.db_path)?;
     let stats = vcs.gc().map_err(|e| e.to_string())?;
@@ -1876,9 +2234,12 @@ MEMORY & VCS COMMANDS:
   compile                     Compile /core memories into <core_memory> block (<5ms)
   ingest [OPTS] <TEXT | ->    Structure PM/Dev/Bot rough notes with auto-[[Wikilinks]] (--draft)
   vault <SUBCMD> <DIR>        Obsidian Vault bridge: init-template | import | sync | export
+  consolidate [OPTS]          Distill /episodic logs into /semantic & /procedural on consolidate/* branch
+  daemon [OPTS]               Start HTTP REST / SSE / Streamable MCP daemon (--port 7700)
+  mount <DIR> [OPTS]          Mount a memory branch or commit as a POSIX FUSE directory
   gc                          Run mark-and-sweep garbage collection
   doctor                      Verify SQLite FTS5/Wiki Graph, provider connectivity, and latency
-  mcp [serve]                 Start stdio JSON-RPC 2.0 MCP Server for Coding Agents
+  mcp [serve]                 Start stdio JSON-RPC 2.0 MCP Server (12 tools) for Coding Agents
 "#
     );
 }

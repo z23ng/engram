@@ -30,17 +30,21 @@ engram/
 │   └── ROADMAP.md
 ├── examples/
 │   ├── obsidian-vault/         # 示例 Obsidian 双链知识库
-│   └── multi_agent_branch_merge.sh
+│   ├── multi_agent_branch_merge.sh
+│   ├── python_quickstart.py    # Python PyO3 5 行快速上手与睡眠整理示例
+│   └── typescript_client.ts    # TypeScript HTTP/SSE SDK 示例
 ├── crates/
 │   ├── mem-core/               # 领域模型层：VirtualPath、MemoryNode、Tier、Commit、Branch、Diff、Error
 │   ├── mem-store/              # 存储底座：SQLite WAL、BLAKE3 CAS、zstd 压缩、FTS5/图谱 Schema
 │   ├── mem-vcs/                # 版本控制内核：Merkle Tree、Branch/Checkout、Commit、Diff、Rewind、3-Way Merge、GC
 │   ├── mem-search/             # 检索与协同层：Obsidian Wiki 解析、混合检索、/core 热编译、ingest 自动织链与双向 Vault 桥接
-│   ├── mem-cli/                # 统一二进制 `mem`：CLI、Clack 风格 `onboard` 向导、`config`、`doctor` 与 `mcp` Server
-│   ├── mem-consolidate/        # (冷路径规划) 后台异步记忆提炼、冲突消解与衰减归档接口
-│   ├── mem-daemon/             # (规划) HTTP / gRPC 独立记忆服务端
-│   └── mem-fuse/               # (Phase 4 可选) 类 LayerFS 的 POSIX FUSE 虚拟文件系统挂载适配器
-└── bindings/                   # (Phase 4 规划) Python / TypeScript 原生 SDK
+│   ├── mem-consolidate/        # 冷路径整理引擎：隔离 consolidate/* 分支扫描 /episodic/、去重提炼 /semantic/ & /procedural/ 与归档衰减
+│   ├── mem-daemon/             # HTTP REST / SSE / Streamable+SSE MCP 守护进程服务端（含 12 个 MCP Tools）
+│   ├── mem-fuse/               # 类 LayerFS 的 POSIX FUSE 虚拟文件系统挂载适配器（mem-fuse / mem mount）
+│   └── mem-cli/                # 统一二进制 `mem`：CLI、Clack 风格 `onboard` 向导、`config`、`doctor`、`consolidate`、`daemon`、`mount` 与 stdio `mcp`
+└── bindings/
+    ├── python/                 # `engram` Python SDK（PyO3 原生嵌入式扩展 + HTTP/SSE Client）
+    └── typescript/             # `@engram-memory/sdk` TypeScript SDK（HTTP/SSE Client + LocalEngram）
 ```
 
 ---
@@ -111,9 +115,9 @@ pub trait VersionControlEngine: Send + Sync {
   - `ingest.rs`：`ingest_knowledge` 与 `IngestRole::{Pm, Dev, Bot}`，支持按角色分域路由、目标分支 `[[Wikilinks]]` 自动织链、`draft/{role}-inbox` 隔离入库，以及可选 OpenAI (`gpt-6-luna`) / Ollama (`qwen2.5:7b`) 润色（含确定性回退）。
   - `vault.rs`：`init_vault_template`（四层协同模板初始化）、`sync_vault`（多层级目录增量同步）、`export_vault`（分支/Commit 快照导出至 Obsidian 目录）与 `import_vault`（单层级导入），自动跳过 `.obsidian/`、`.git/` 与 `_templates/`。
 
-### 2.5 内置 MCP Server（`crates/mem-cli/src/mcp.rs`）
-- **职责**：作为内置 stdio JSON-RPC 2.0 MCP Server 直接嵌入任意 AI Coding Agent（Cursor / Claude Code / Claude Desktop / Windsurf），后续规划扩展独立 `mem-mcp` HTTP SSE 形态。
-- **暴露的 11 个核心 MCP Tools**：
+### 2.5 MCP Server（`crates/mem-daemon/src/mcp_rpc.rs` & `crates/mem-cli/src/mcp.rs`）
+- **职责**：同时提供 stdio JSON-RPC 2.0（`mem mcp serve`，嵌入 Cursor / Claude Code / Claude Desktop / Windsurf）以及 Streamable HTTP (`POST /mcp`) 与 HTTP+SSE (`GET /mcp/sse` + `POST /mcp/messages`) 三种 MCP 传输模式。
+- **暴露的 12 个核心 MCP Tools**：
   - `mem_read(path, branch?, commit_id?)` / `mem_list(prefix?, branch?)`
   - `mem_write(path, content, tags?, importance?, branch?)`
   - `mem_ingest(text, role?, draft?, title?, path?, tier?, tags?, use_llm?, branch?)`
@@ -124,9 +128,16 @@ pub trait VersionControlEngine: Send + Sync {
   - `mem_rewind(commit_id, branch?)`
   - `mem_diff(base, target)`
   - `mem_merge(source, target, strategy?)`
+  - `mem_consolidate(branch?, consolidation_branch?, prefix?, max_notes?, min_importance?, use_llm?, auto_merge?, strategy?, archive_processed?, delete_branch?, dry_run?)`
 
-### 2.6 `crates/mem-cli`
-- **职责**：提供类 Git 体验的命令行交互工具 `mem`（含 `onboard`、`config`、`ingest`、`vault`、`doctor`、`completions` 与 `mcp`）。
+### 2.6 `crates/mem-consolidate`、`crates/mem-daemon`、`crates/mem-fuse` 与 `bindings/`
+- **`crates/mem-consolidate`**：`ConsolidationEngine` 在隔离 `consolidate/*` 分支扫描 `/episodic/` 日志，基于 Jaccard 去重或可选 OpenAI/Ollama LLM 提炼 `/semantic/consolidated/*` 知识卡片与 `/procedural/consolidated/*` SOP，自动编织 `[[Wikilinks]]`，并支持 `archive_processed` 归档与自动三路合并。
+- **`crates/mem-daemon`**：基于 `tokio` + `axum` 提供 `/v1/*` REST API、`/v1/events` 按分支过滤 SSE 实时事件流、`/mcp` Streamable HTTP & `/mcp/sse` 传输、可选 Bearer Token 鉴权及后台周期整理任务。
+- **`crates/mem-fuse`**：基于 `MemoryPosixFs` 与 `fuser` 将指定分支或只读 Commit 挂载为本地 POSIX 目录，支持 `ls` / `cat` / `grep` / `mv` / `mkdir` 并自动持久化索引。
+- **`bindings/python` (`engram`) & `bindings/typescript` (`@engram-memory/sdk`)**：分别提供 PyO3 原生单文件 SQLite 绑定 (`engram.open`)、HTTP/SSE `EngramClient` 与 Node `LocalEngram` 封装。
+
+### 2.7 `crates/mem-cli`
+- **职责**：提供类 Git 体验的命令行交互工具 `mem`（含 `onboard`、`config`、`ingest`、`vault`、`consolidate`、`daemon`、`mount`、`doctor`、`completions` 与 `mcp`）。
 - **典型工作流示例**：
   ```bash
   mem onboard --mode lite --seed-demo
@@ -135,12 +146,11 @@ pub trait VersionControlEngine: Send + Sync {
   mem ingest --role pm --draft --title "Checkout Retry" "All retries obey SQLite WAL busy_timeout."
   mem diff main draft/pm-inbox
   mem merge draft/pm-inbox main
-  mem vault export ./team-vault --branch main
+  mem consolidate --auto-merge --archive --delete-branch
+  mem daemon --port 7700
+  mem mount /tmp/engram-mnt --branch main
   mem mcp serve
   ```
-
-### 2.7 `crates/mem-fuse`（Phase 4 可选模块）
-- **职责**：借鉴 LayerFS 的 FUSE 挂载能力，允许将某个 Memory Branch 直接挂载为本地只读或可写目录（如 `/mnt/memory/main/`），让不熟悉 MCP 的工具或脚本直接通过 `cat`/`grep`/`echo` 读写版本化记忆。
 
 ---
 
