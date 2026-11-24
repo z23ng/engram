@@ -1,6 +1,6 @@
 //! Axum HTTP REST, SSE event streaming, and HTTP/SSE MCP routes for `mem-daemon`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,11 +14,12 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use mem_consolidate::{ConsolidationEngine, ConsolidationMergeStatus, ConsolidationRequest};
 use mem_core::{
-    CommitId, MemError, MemoryMetadata, MemoryNode, MemoryTier, MergeOutcome, MergeStrategy,
-    Revision, VirtualPath,
+    BlobId, CommitId, MemError, MemoryMetadata, MemoryNode, MemoryTier, MergeOutcome,
+    MergeStrategy, Revision, VirtualPath,
 };
 use mem_search::{IngestRequest, IngestRole, SearchRequest};
 use mem_vcs::VersionControlEngine;
+use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, RwLock};
@@ -111,9 +112,11 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
-/// Constructs the complete Axum [`Router`] with REST, SSE, and MCP endpoints.
+/// Constructs the complete Axum [`Router`] with Web UI, REST, SSE, and MCP endpoints.
 pub fn build_router(state: DaemonState) -> Router {
     Router::new()
+        .route("/", get(crate::ui::index_html))
+        .route("/ui", get(crate::ui::index_html))
         .route("/health", get(health))
         .route("/v1/status", get(get_status))
         .route("/v1/nodes", get(list_nodes))
@@ -126,6 +129,7 @@ pub fn build_router(state: DaemonState) -> Router {
         .route("/v1/merge", post(merge_branches))
         .route("/v1/gc", post(run_gc))
         .route("/v1/search", post(search_memories))
+        .route("/v1/graph", get(get_branch_graph))
         .route("/v1/compile", post(compile_core_route))
         .route("/v1/ingest", post(ingest_note))
         .route("/v1/consolidate", post(consolidate_branch))
@@ -1045,6 +1049,302 @@ async fn mcp_sse_message(
     }
 
     Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct GraphQuery {
+    branch: Option<String>,
+    token: Option<String>,
+}
+
+async fn get_branch_graph(
+    State(state): State<DaemonState>,
+    headers: HeaderMap,
+    Query(q): Query<GraphQuery>,
+) -> ApiResult<Json<Value>> {
+    verify_auth(&state, &headers, q.token.as_deref())?;
+    let branch = q.branch.unwrap_or_else(|| "main".to_string());
+    let search = state.search.clone();
+
+    let payload = run_blocking(move || {
+        let rev = Revision::BranchWorkspace(branch.clone());
+        let vcs = search.vcs();
+        let active = vcs.list(&rev, None)?;
+        search.ensure_revision_indexed(&rev, None)?;
+
+        let mut paths_by_blob: HashMap<BlobId, Vec<VirtualPath>> = HashMap::new();
+        for (path, blob_id, _) in &active {
+            paths_by_blob
+                .entry(*blob_id)
+                .or_default()
+                .push(path.clone());
+        }
+
+        let (headers_by_blob, raw_links) = vcs.store().with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS _mem_graph_active_blobs (blob_id TEXT PRIMARY KEY);
+                 DELETE FROM _mem_graph_active_blobs;",
+            )
+            .map_err(|e| {
+                MemError::Storage(format!("failed to prepare graph temp blobs table: {e}"))
+            })?;
+
+            {
+                let mut insert_stmt = conn
+                    .prepare_cached(
+                        "INSERT OR IGNORE INTO _mem_graph_active_blobs (blob_id) VALUES (?1)",
+                    )
+                    .map_err(|e| {
+                        MemError::Storage(format!("failed to prepare graph temp blob insert: {e}"))
+                    })?;
+                for blob_id in paths_by_blob.keys() {
+                    insert_stmt
+                        .execute(params![blob_id.to_hex()])
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to insert graph temp blob: {e}"))
+                        })?;
+                }
+            }
+
+            let res = (|| {
+                let mut headers_map: HashMap<BlobId, (String, Vec<String>)> = HashMap::new();
+                {
+                    let mut stmt = conn
+                        .prepare_cached(
+                            "SELECT c.blob_id, c.title, c.aliases
+                             FROM chunk_index AS c
+                             INNER JOIN _mem_graph_active_blobs AS a ON a.blob_id = c.blob_id
+                             WHERE c.chunk_seq = 0",
+                        )
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to prepare graph header query: {e}"))
+                        })?;
+                    let rows = stmt
+                        .query_map([], |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        })
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to query graph headers: {e}"))
+                        })?;
+                    for row in rows {
+                        let (hex, title, aliases_joined) = row.map_err(|e| {
+                            MemError::Storage(format!("failed to decode graph header row: {e}"))
+                        })?;
+                        let blob_id = BlobId::from_hex(&hex)?;
+                        let aliases = if aliases_joined.is_empty() {
+                            Vec::new()
+                        } else {
+                            aliases_joined
+                                .split(" | ")
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        };
+                        headers_map.insert(blob_id, (title, aliases));
+                    }
+                }
+
+                let mut links: Vec<(BlobId, String)> = Vec::new();
+                {
+                    let mut stmt = conn
+                        .prepare_cached(
+                            "SELECT l.source_blob_id, l.target_ref
+                             FROM blob_links AS l
+                             INNER JOIN _mem_graph_active_blobs AS a ON a.blob_id = l.source_blob_id
+                             WHERE l.link_kind = 'wikilink'",
+                        )
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to prepare graph links query: {e}"))
+                        })?;
+                    let rows = stmt
+                        .query_map([], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                        })
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to query graph wikilinks: {e}"))
+                        })?;
+                    for row in rows {
+                        let (hex, target_ref) = row.map_err(|e| {
+                            MemError::Storage(format!("failed to decode graph link row: {e}"))
+                        })?;
+                        links.push((BlobId::from_hex(&hex)?, target_ref));
+                    }
+                }
+
+                Ok((headers_map, links))
+            })();
+
+            let _ = conn.execute_batch("DELETE FROM _mem_graph_active_blobs;");
+            res
+        })?;
+
+        let mut wiki_resolver: HashMap<String, Vec<VirtualPath>> = HashMap::new();
+        for (path, blob_id, _) in &active {
+            let (title, aliases) = headers_by_blob
+                .get(blob_id)
+                .map(|(t, a)| (t.as_str(), a.as_slice()))
+                .unwrap_or_else(|| {
+                    let fallback = path
+                        .file_name()
+                        .and_then(|n| n.strip_suffix(".md").or(Some(n)))
+                        .unwrap_or_else(|| path.as_str());
+                    (fallback, &[])
+                });
+            register_graph_resolver_keys(&mut wiki_resolver, path, title, aliases);
+        }
+
+        let mut unique_edges: BTreeMap<(String, String), String> = BTreeMap::new();
+        let mut out_degrees: HashMap<String, usize> = HashMap::new();
+        let mut in_degrees: HashMap<String, usize> = HashMap::new();
+
+        for (source_blob, target_ref) in raw_links {
+            let Some(source_paths) = paths_by_blob.get(&source_blob) else {
+                continue;
+            };
+            let Some(target_paths) = resolve_graph_wiki_target(&wiki_resolver, &target_ref) else {
+                continue;
+            };
+            for src in source_paths {
+                for tgt in &target_paths {
+                    if src != tgt {
+                        let src_path = src.as_str().to_string();
+                        let tgt_path = tgt.as_str().to_string();
+                        if let std::collections::btree_map::Entry::Vacant(entry) =
+                            unique_edges.entry((src_path.clone(), tgt_path.clone()))
+                        {
+                            *out_degrees.entry(src_path).or_insert(0) += 1;
+                            *in_degrees.entry(tgt_path).or_insert(0) += 1;
+                            entry.insert(target_ref.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let nodes: Vec<Value> = active
+            .iter()
+            .map(|(path, blob_id, meta)| {
+                let p_str = path.as_str().to_string();
+                let title = headers_by_blob
+                    .get(blob_id)
+                    .map(|(t, _)| t.clone())
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .map(|f| f.strip_suffix(".md").unwrap_or(f).to_string())
+                            .unwrap_or_else(|| p_str.clone())
+                    });
+                json!({
+                    "id": p_str,
+                    "path": p_str,
+                    "title": title,
+                    "tier": path.tier().as_str(),
+                    "importance": meta.importance,
+                    "tags": meta.tags,
+                    "blob_id": blob_id.to_hex(),
+                    "in_degree": in_degrees.get(&p_str).copied().unwrap_or(0),
+                    "out_degree": out_degrees.get(&p_str).copied().unwrap_or(0),
+                })
+            })
+            .collect();
+
+        let edges: Vec<Value> = unique_edges
+            .into_iter()
+            .map(|((source, target), label)| {
+                json!({
+                    "source": source,
+                    "target": target,
+                    "kind": "wikilink",
+                    "label": label,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "branch": branch,
+            "nodes": nodes,
+            "edges": edges,
+        }))
+    })
+    .await?;
+
+    Ok(Json(payload))
+}
+
+fn normalize_graph_lookup_key(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_lowercase()
+}
+
+fn register_graph_resolver_keys(
+    resolver: &mut HashMap<String, Vec<VirtualPath>>,
+    path: &VirtualPath,
+    title: &str,
+    aliases: &[String],
+) {
+    let mut keys = Vec::new();
+    let full_lower = path.as_str().to_lowercase();
+    keys.push(full_lower.clone());
+    if let Some(no_ext) = full_lower.strip_suffix(".md") {
+        keys.push(no_ext.to_string());
+    }
+    let no_leading = full_lower.trim_start_matches('/').to_string();
+    keys.push(no_leading.clone());
+    if let Some(no_ext_rel) = no_leading.strip_suffix(".md") {
+        keys.push(no_ext_rel.to_string());
+    }
+
+    if let Some(file_name) = path.file_name() {
+        let fname = file_name.to_lowercase();
+        keys.push(fname.clone());
+        if let Some(stem) = fname.strip_suffix(".md") {
+            keys.push(stem.to_string());
+        }
+    }
+
+    let t = title.trim().to_lowercase();
+    if !t.is_empty() {
+        keys.push(t);
+    }
+
+    for alias in aliases {
+        let a = alias.trim().to_lowercase();
+        if !a.is_empty() {
+            keys.push(a);
+        }
+    }
+
+    for key in keys {
+        let entry = resolver.entry(key).or_default();
+        if !entry.contains(path) {
+            entry.push(path.clone());
+        }
+    }
+}
+
+fn resolve_graph_wiki_target(
+    resolver: &HashMap<String, Vec<VirtualPath>>,
+    target_ref: &str,
+) -> Option<Vec<VirtualPath>> {
+    let exact_lower = target_ref.trim().to_lowercase();
+    if let Some(found) = resolver.get(&exact_lower) {
+        return Some(found.clone());
+    }
+    let no_ext = exact_lower.strip_suffix(".md").unwrap_or(&exact_lower);
+    if let Some(found) = resolver.get(no_ext) {
+        return Some(found.clone());
+    }
+    let normalized = normalize_graph_lookup_key(target_ref);
+    if let Some(found) = resolver.get(&normalized) {
+        return Some(found.clone());
+    }
+    None
 }
 
 fn default_main() -> String {

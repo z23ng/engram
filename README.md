@@ -132,9 +132,9 @@ mem rewind <healthy_commit_id>
 # 5. 一键运行多 Agent 分支合并实战示例
 ./examples/multi_agent_branch_merge.sh
 
-# 6. 冷路径睡眠整理、HTTP Daemon 与 POSIX FUSE 挂载
+# 6. 冷路径睡眠整理、HTTP Daemon（含内置 Web 控制台）与 POSIX FUSE 挂载
 mem consolidate --auto-merge --archive --delete-branch
-mem daemon --host 127.0.0.1 --port 7700
+mem daemon --host 127.0.0.1 --port 7700   # 启动后浏览器打开 http://127.0.0.1:7700/
 mem mount /tmp/engram-mnt --branch main
 ```
 

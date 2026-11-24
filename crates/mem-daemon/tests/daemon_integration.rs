@@ -647,3 +647,132 @@ async fn daemon_concurrent_multi_branch_writes_and_searches_stay_isolated() {
 
     let _ = shutdown.send(());
 }
+
+#[tokio::test]
+async fn daemon_web_ui_and_branch_graph_isolation() {
+    let (addr, shutdown) = spawn_test_daemon(Some("ui-token-7")).await;
+    let tok = Some("ui-token-7");
+
+    // Web UI loads cleanly without an Authorization header so users can enter bearer tokens in-app.
+    for path in ["/", "/ui"] {
+        let resp = http_request(addr, "GET", path, None, None).await;
+        assert_eq!(resp.status, 200, "expected 200 for {path}");
+        assert!(resp.body.contains("Engram"), "expected Engram title in {path}");
+        assert!(resp.body.contains("/v1/graph"), "expected graph endpoint in {path}");
+    }
+
+    // /v1/graph still enforces bearer authentication.
+    let unauth_graph = http_request(addr, "GET", "/v1/graph?branch=main", None, None).await;
+    assert_eq!(unauth_graph.status, 401);
+
+    // Populate main branch with linked notes.
+    let w1 = http_request(
+        addr,
+        "PUT",
+        "/v1/node",
+        tok,
+        Some(json!({
+            "branch": "main",
+            "path": "/semantic/architecture.md",
+            "content": "---\ntitle: Engram Architecture\ntags: [core, design]\n---\n\n# Engram Architecture\n\nUses [[sqlite-wal]] for ACID snapshots.\n",
+            "tags": ["core", "design"],
+            "importance": 0.9
+        })),
+    )
+    .await;
+    assert_eq!(w1.status, 200);
+
+    let w2 = http_request(
+        addr,
+        "PUT",
+        "/v1/node",
+        tok,
+        Some(json!({
+            "branch": "main",
+            "path": "/procedural/sqlite-wal.md",
+            "content": "# SQLite WAL\n\nReferenced by [[Engram Architecture]].\n",
+            "tags": ["sqlite"],
+            "importance": 0.8
+        })),
+    )
+    .await;
+    assert_eq!(w2.status, 200);
+
+    let commit_main = http_request(
+        addr,
+        "POST",
+        "/v1/commits",
+        tok,
+        Some(json!({ "branch": "main", "message": "seed graph notes", "author": "tester" })),
+    )
+    .await;
+    assert_eq!(commit_main.status, 200);
+
+    // Fork exp/isolated branch with additional notes & links.
+    let mk_branch = http_request(
+        addr,
+        "POST",
+        "/v1/branches",
+        tok,
+        Some(json!({ "name": "exp/isolated", "from": "main" })),
+    )
+    .await;
+    assert_eq!(mk_branch.status, 200);
+
+    let w3 = http_request(
+        addr,
+        "PUT",
+        "/v1/node",
+        tok,
+        Some(json!({
+            "branch": "exp/isolated",
+            "path": "/semantic/secret-idea.md",
+            "content": "# Secret Idea\n\nConnects [[sqlite-wal]] and [[unmerged-sibling]].\n"
+        })),
+    )
+    .await;
+    assert_eq!(w3.status, 200);
+
+    let w4 = http_request(
+        addr,
+        "PUT",
+        "/v1/node",
+        tok,
+        Some(json!({
+            "branch": "exp/isolated",
+            "path": "/semantic/unmerged-sibling.md",
+            "content": "# Unmerged Sibling\n\nExperimental branch only.\n"
+        })),
+    )
+    .await;
+    assert_eq!(w4.status, 200);
+
+    // Graph for main must strictly omit exp/isolated nodes and edges.
+    let main_graph_resp = http_request(addr, "GET", "/v1/graph?branch=main", tok, None).await;
+    assert_eq!(main_graph_resp.status, 200);
+    let main_graph: Value = serde_json::from_str(&main_graph_resp.body).unwrap();
+    let main_nodes = main_graph["nodes"].as_array().unwrap();
+    let main_edges = main_graph["edges"].as_array().unwrap();
+    assert_eq!(main_nodes.len(), 2);
+    assert!(main_nodes.iter().all(|n| n["path"] != "/semantic/secret-idea.md"));
+    assert!(main_edges.iter().any(|e| {
+        e["source"] == "/semantic/architecture.md" && e["target"] == "/procedural/sqlite-wal.md"
+    }));
+    assert!(main_edges.iter().any(|e| {
+        e["source"] == "/procedural/sqlite-wal.md" && e["target"] == "/semantic/architecture.md"
+    }));
+
+    // Graph for exp/isolated includes all 4 nodes and its branch-specific edges.
+    let exp_graph_resp =
+        http_request(addr, "GET", "/v1/graph?branch=exp%2Fisolated", tok, None).await;
+    assert_eq!(exp_graph_resp.status, 200);
+    let exp_graph: Value = serde_json::from_str(&exp_graph_resp.body).unwrap();
+    let exp_nodes = exp_graph["nodes"].as_array().unwrap();
+    let exp_edges = exp_graph["edges"].as_array().unwrap();
+    assert_eq!(exp_nodes.len(), 4);
+    assert!(exp_edges.iter().any(|e| {
+        e["source"] == "/semantic/secret-idea.md" && e["target"] == "/semantic/unmerged-sibling.md"
+    }));
+
+    let _ = shutdown.send(());
+}

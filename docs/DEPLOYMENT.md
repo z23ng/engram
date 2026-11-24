@@ -85,12 +85,18 @@ mem vault export ./team-vault --branch main
 
 ## 5. `mem-daemon` 服务与 Docker 容器化部署
 
-对于需要多进程/多容器并发共享同一记忆库、SSE 事件订阅或远程 HTTP MCP 接入的场景，可启动独立守护进程 `mem daemon`（或 `mem-daemon`）：
+对于需要多进程/多容器并发共享同一记忆库、Web 控制台可视化浏览、SSE 事件订阅或远程 HTTP MCP 接入的场景，可启动独立守护进程 `mem daemon`（或 `mem-daemon`）：
 
 ```bash
-# 本地或服务器启动 HTTP REST / SSE / MCP Daemon（默认端口 7700，支持 Bearer 鉴权与定时整理）
+# 本地或服务器启动 HTTP REST / Web UI / SSE / MCP Daemon（默认端口 7700，支持 Bearer 鉴权与定时整理）
 mem daemon --host 0.0.0.0 --port 7700 --token "$MEM_DAEMON_TOKEN" --consolidate-interval 3600 --consolidate-auto-merge
 ```
+
+启动后可直接用浏览器访问内置零依赖单页 Web 控制台：**`http://127.0.0.1:7700/`**（或 `/ui`），支持：
+- 多分支切换、创建、删除、Markdown 源码编辑与可点击 `[[Wikilink]]` 实时预览；
+- 分支隔离的 Graph-RRF 混合检索与交互式 SVG 知识图谱（后端 `GET /v1/graph?branch=...`）；
+- 提交历史时间线、Rewind 时光倒流、Merkle Tree Diff 与三路分支合并；
+- 多角色 Ingest、冷路径 Sleep Consolidation、`/core` 提示词编译、存储 GC 与 `/v1/events` SSE 实时事件流（若启用了 `--token`，可在右上角 `Auth` 弹窗填入 Bearer Token）。
 
 对于习惯容器化运维的服务器，可直接复用仓库内置的 [Dockerfile](../Dockerfile) 与 [docker-compose.yml](../docker-compose.yml)（默认即以 `mem daemon` 启动并暴露 `7700` 端口）：
 

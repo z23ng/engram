@@ -1962,6 +1962,7 @@ fn cmd_daemon(opts: &GlobalOpts, args: &[String]) -> std::result::Result<ExitCod
         cfg.db_path.display(),
         if cfg.auth_token.is_some() { "bearer" } else { "open" }
     );
+    println!("  Web UI   : http://{}:{}/", cfg.host, cfg.port);
     println!("  REST API : /v1/*   |   SSE : /v1/events   |   MCP : POST /mcp & GET /mcp/sse");
 
     let rt = tokio::runtime::Builder::new_multi_thread()

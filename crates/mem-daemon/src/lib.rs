@@ -4,6 +4,7 @@ pub mod events;
 pub mod mcp_rpc;
 pub mod routes;
 pub mod state;
+pub mod ui;
 
 use std::future::Future;
 use std::time::Duration;

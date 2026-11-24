@@ -600,6 +600,7 @@ dependencies = [
  "mem-search",
  "mem-store",
  "mem-vcs",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

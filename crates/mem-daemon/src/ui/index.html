@@ -1,0 +1,2256 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Engram Console — Versioned AI Memory Engine</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --bg-elev: #111622;
+      --bg-panel: #151c2c;
+      --bg-input: #0e131d;
+      --bg-hover: rgba(255, 255, 255, 0.05);
+      --border: rgba(255, 255, 255, 0.09);
+      --border-strong: rgba(255, 255, 255, 0.16);
+      --text: #e6edf7;
+      --text-muted: #8b9bb4;
+      --text-dim: #64748b;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.14);
+      --tier-core: #f59e0b;
+      --tier-semantic: #10b981;
+      --tier-procedural: #38bdf8;
+      --tier-episodic: #a78bfa;
+      --danger: #f43f5e;
+      --danger-soft: rgba(244, 63, 94, 0.14);
+      --warn: #fbbf24;
+      --ok: #22c55e;
+      --radius: 8px;
+      --radius-sm: 6px;
+      --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+      --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    html[data-theme="light"] {
+      --bg: #f1f5f9;
+      --bg-elev: #ffffff;
+      --bg-panel: #f8fafc;
+      --bg-input: #ffffff;
+      --bg-hover: rgba(15, 23, 42, 0.045);
+      --border: rgba(15, 23, 42, 0.1);
+      --border-strong: rgba(15, 23, 42, 0.2);
+      --text: #0f172a;
+      --text-muted: #475569;
+      --text-dim: #64748b;
+      --accent: #0284c7;
+      --accent-soft: rgba(2, 132, 199, 0.1);
+      --danger: #e11d48;
+      --danger-soft: rgba(225, 29, 72, 0.1);
+      --ok: #16a34a;
+      --shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    button, input, select, textarea {
+      font-family: inherit;
+      font-size: inherit;
+      color: var(--text);
+    }
+
+    button {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--bg-panel);
+      border-radius: var(--radius-sm);
+      padding: 5px 10px;
+      font-weight: 500;
+      transition: background 0.12s, border-color 0.12s, transform 0.06s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) {
+      background: var(--bg-hover);
+      border-color: var(--border-strong);
+    }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary {
+      background: var(--accent);
+      color: #07131d;
+      border-color: transparent;
+      font-weight: 600;
+    }
+    html[data-theme="light"] button.primary { color: #ffffff; }
+    button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+    button.danger {
+      color: var(--danger);
+      border-color: rgba(244, 63, 94, 0.35);
+      background: var(--danger-soft);
+    }
+    button.danger:hover:not(:disabled) { border-color: var(--danger); }
+
+    input[type="text"], input[type="number"], input[type="password"], select, textarea {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 9px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+
+    .mono { font-family: var(--font-mono); }
+    .muted { color: var(--text-muted); }
+    .small { font-size: 11.5px; }
+
+    /* Top bar */
+    header.topbar {
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-weight: 700;
+      font-size: 14.5px;
+      letter-spacing: -0.01em;
+    }
+    .brand-badge {
+      font-size: 10.5px;
+      font-family: var(--font-mono);
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      display: inline-block;
+    }
+    .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(34, 197, 94, 0.55); }
+    .dot.warn { background: var(--warn); }
+    .dot.err { background: var(--danger); }
+
+    /* Tabs */
+    nav.tabs {
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    .tab-list { display: flex; gap: 2px; }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      padding: 9px 13px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .tab-btn:hover { color: var(--text); background: var(--bg-hover); }
+    .tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      font-weight: 600;
+    }
+    .status-strip {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      padding: 4px 0;
+    }
+    .staged-badge {
+      background: rgba(245, 158, 11, 0.16);
+      color: var(--tier-core);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    /* Main Layout */
+    main.workspace {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+    section.tab-panel {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    section.tab-panel.active { display: flex; }
+
+    /* Tier badges */
+    .tier-badge {
+      font-size: 10px;
+      font-family: var(--font-mono);
+      text-transform: uppercase;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      flex-shrink: 0;
+    }
+    .tier-core { color: var(--tier-core); background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245, 158, 11, 0.28); }
+    .tier-semantic { color: var(--tier-semantic); background: rgba(16, 185, 129, 0.14); border: 1px solid rgba(16, 185, 129, 0.28); }
+    .tier-procedural { color: var(--tier-procedural); background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.28); }
+    .tier-episodic { color: var(--tier-episodic); background: rgba(167, 139, 250, 0.14); border: 1px solid rgba(167, 139, 250, 0.28); }
+
+    /* Tab 1: Files & Editor */
+    .files-layout {
+      display: grid;
+      grid-template-columns: 290px 1fr;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+    }
+    .sidebar {
+      background: var(--bg-elev);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .sidebar-top {
+      padding: 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .tier-filters { display: flex; gap: 4px; flex-wrap: wrap; }
+    .chip-btn {
+      font-size: 11px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: var(--bg-panel);
+      color: var(--text-muted);
+    }
+    .chip-btn.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+    .file-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .file-item {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      padding: 7px 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 3px;
+    }
+    .file-item:hover { background: var(--bg-hover); }
+    .file-item.active {
+      background: var(--accent-soft);
+      border-color: rgba(56, 189, 248, 0.35);
+    }
+    .file-item-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .file-path {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tag-row { display: flex; gap: 4px; flex-wrap: wrap; }
+    .tag-pill {
+      font-size: 10px;
+      padding: 0 5px;
+      border-radius: 4px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .editor-area {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      min-width: 0;
+      background: var(--bg);
+    }
+    .editor-toolbar {
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .editor-toolbar input.path-input { flex: 1; min-width: 200px; font-family: var(--font-mono); }
+    .editor-split {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+    .editor-pane, .preview-pane {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .editor-pane { border-right: 1px solid var(--border); }
+    .pane-header {
+      padding: 6px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-dim);
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    textarea.code-editor {
+      flex: 1;
+      width: 100%;
+      border: none;
+      border-radius: 0;
+      resize: none;
+      padding: 14px;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.6;
+      background: var(--bg);
+    }
+    .markdown-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      line-height: 1.65;
+      word-break: break-word;
+    }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+      margin: 14px 0 7px;
+      line-height: 1.25;
+    }
+    .markdown-body h1 { font-size: 19px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+    .markdown-body h2 { font-size: 15.5px; }
+    .markdown-body h3 { font-size: 14px; }
+    .markdown-body pre {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .markdown-body code {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: var(--bg-panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .markdown-body blockquote {
+      margin: 8px 0;
+      padding: 6px 12px;
+      border-left: 3px solid var(--accent);
+      background: var(--bg-elev);
+      color: var(--text-muted);
+    }
+    .fm-box {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      margin-bottom: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 12px;
+      font-size: 11.5px;
+    }
+    .wikilink-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 6px;
+      margin: 0 1px;
+      border-radius: 4px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      line-height: 1.45;
+    }
+    .wikilink-chip:hover { filter: brightness(1.15); }
+    .wikilink-chip.missing {
+      background: rgba(245, 158, 11, 0.1);
+      color: var(--tier-core);
+      border-color: rgba(245, 158, 11, 0.3);
+    }
+
+    /* Tab 2: Search & Wiki Graph */
+    .search-graph-layout {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+    }
+    .search-bar {
+      padding: 10px 14px;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .search-split {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 44% 56%;
+    }
+    .scroll-col {
+      overflow-y: auto;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 0;
+    }
+    .search-split > .scroll-col { border-right: 1px solid var(--border); }
+    .card {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .graph-container {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      background: var(--bg);
+    }
+    .graph-toolbar {
+      padding: 8px 12px;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .graph-stage {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    svg#graphSvg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      user-select: none;
+    }
+    .graph-node { cursor: grab; }
+    .graph-node:active { cursor: grabbing; }
+    .graph-node text {
+      font-family: var(--font-sans);
+      font-size: 11px;
+      fill: var(--text);
+      pointer-events: none;
+    }
+    .graph-inspector {
+      padding: 9px 12px;
+      background: var(--bg-elev);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-height: 44px;
+    }
+
+    /* Multi-column tabs */
+    .grid-3 {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-columns: 1.15fr 1fr 0.9fr;
+      min-height: 0;
+    }
+    .grid-2 {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 0;
+    }
+    .col-pane {
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .col-pane:last-child { border-right: none; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field.full { grid-column: 1 / -1; }
+    .field label { font-size: 11.5px; color: var(--text-muted); font-weight: 500; }
+    .checkbox-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .checkbox-row label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text); cursor: pointer; }
+
+    .diff-added { color: var(--ok); }
+    .diff-modified { color: var(--warn); }
+    .diff-deleted { color: var(--danger); }
+
+    .sse-item {
+      border-left: 3px solid var(--accent);
+      background: var(--bg-elev);
+      border-top: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+    pre.out-box {
+      margin: 0;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+
+    /* Modals & Toast */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.58);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      padding: 16px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: var(--bg-elev);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      width: min(440px, 100%);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .modal h3 { margin: 0; font-size: 15px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+    #toastHost {
+      position: fixed;
+      right: 14px;
+      bottom: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 60;
+      max-width: 380px;
+    }
+    .toast {
+      background: var(--bg-elev);
+      border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--accent);
+      box-shadow: var(--shadow);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      font-size: 12.5px;
+    }
+    .toast.err { border-left-color: var(--danger); }
+    .toast.ok { border-left-color: var(--ok); }
+
+    @media (max-width: 980px) {
+      .files-layout, .editor-split, .search-split, .grid-3, .grid-2 {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+      }
+      section.tab-panel { overflow-y: auto; }
+      .sidebar { max-height: 240px; border-right: none; border-bottom: 1px solid var(--border); }
+      .editor-pane { min-height: 260px; border-right: none; border-bottom: 1px solid var(--border); }
+      .graph-stage { min-height: 360px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="3" y="3" width="18" height="18" rx="4" stroke="var(--accent)" stroke-width="2"/>
+        <circle cx="8.5" cy="9" r="2" fill="var(--tier-core)"/>
+        <circle cx="15.5" cy="9" r="2" fill="var(--tier-semantic)"/>
+        <circle cx="12" cy="15.5" r="2" fill="var(--tier-procedural)"/>
+        <path d="M10.2 9.8L13.8 9.8M9.5 10.7L11.2 14M14.5 10.7L12.8 14" stroke="var(--text-muted)" stroke-width="1.4"/>
+      </svg>
+      <span>Engram</span>
+      <span class="brand-badge">mem-daemon UI</span>
+      <span class="pill" id="connPill"><span class="dot" id="connDot"></span><span id="connText">Connecting…</span></span>
+      <span class="pill" id="ssePill"><span class="dot" id="sseDot"></span><span id="sseText">SSE</span></span>
+    </div>
+
+    <div class="toolbar-group">
+      <label class="small muted" for="branchSelect">Branch:</label>
+      <select id="branchSelect" style="min-width: 150px;"></select>
+      <button type="button" id="btnNewBranch">+ Branch</button>
+      <button type="button" id="btnDelBranch" class="danger" title="Delete selected branch">Delete Branch</button>
+      <button type="button" id="btnAuthModal" title="Configure Bearer Token">Auth</button>
+      <button type="button" id="btnTheme" title="Toggle Light / Dark theme">Theme</button>
+      <button type="button" id="btnRefreshAll">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <div class="tab-list" role="tablist">
+      <button type="button" class="tab-btn active" data-tab="files">Files &amp; Editor</button>
+      <button type="button" class="tab-btn" data-tab="search">Search &amp; Wiki Graph</button>
+      <button type="button" class="tab-btn" data-tab="vcs">Commits, Diff &amp; Merge</button>
+      <button type="button" class="tab-btn" data-tab="workflow">Ingest &amp; Consolidate</button>
+      <button type="button" class="tab-btn" data-tab="ops">/core, GC &amp; Live Events</button>
+    </div>
+    <div class="status-strip" id="statusStrip">
+      <span>HEAD: <strong class="mono" id="statHead">-</strong></span>
+      <span>Nodes: <strong id="statNodes">0</strong></span>
+      <span>Blobs/Commits: <strong class="mono" id="statStorage">0/0</strong></span>
+      <span class="staged-badge" id="statStagedBtn" style="display:none;" title="Click to commit staged changes">0 staged</span>
+    </div>
+  </nav>
+
+  <main class="workspace">
+    <!-- TAB 1: FILES & EDITOR -->
+    <section class="tab-panel active" id="tab-files">
+      <div class="files-layout">
+        <aside class="sidebar">
+          <div class="sidebar-top">
+            <div style="display:flex; gap:6px;">
+              <input type="text" id="fileFilterInput" placeholder="Filter path or #tag…" style="flex:1; min-width:0;">
+              <button type="button" id="btnNewNote" class="primary">+ Note</button>
+            </div>
+            <div class="tier-filters" id="tierFilterGroup">
+              <button type="button" class="chip-btn active" data-tier="all">All</button>
+              <button type="button" class="chip-btn" data-tier="core">core</button>
+              <button type="button" class="chip-btn" data-tier="semantic">semantic</button>
+              <button type="button" class="chip-btn" data-tier="procedural">procedural</button>
+              <button type="button" class="chip-btn" data-tier="episodic">episodic</button>
+            </div>
+          </div>
+          <div class="file-list" id="fileList"></div>
+        </aside>
+
+        <div class="editor-area">
+          <div class="editor-toolbar">
+            <input type="text" class="path-input" id="editPath" placeholder="/semantic/example.md">
+            <label class="small muted">Imp:</label>
+            <input type="number" id="editImportance" min="0" max="1" step="0.05" value="0.7" style="width:72px;">
+            <label class="small muted">Tags:</label>
+            <input type="text" id="editTags" placeholder="rust, sqlite" style="width:155px;">
+            <button type="button" id="btnStageNote" class="primary" title="Shortcut: Ctrl/Cmd+S">Stage Note</button>
+            <button type="button" id="btnOpenCommitModal">Commit Branch…</button>
+            <button type="button" id="btnDeleteNote" class="danger">Delete</button>
+          </div>
+          <div class="editor-split">
+            <div class="editor-pane">
+              <div class="pane-header">
+                <span>Markdown Source</span>
+                <span class="mono" id="editBlobBadge">-</span>
+              </div>
+              <textarea id="editContent" class="code-editor" placeholder="Select a memory note on the left or click '+ Note' to create one…"></textarea>
+            </div>
+            <div class="preview-pane">
+              <div class="pane-header">
+                <span>Rendered Preview (Click [[Wikilinks]] to Navigate)</span>
+                <span class="small muted" id="editUpdatedBadge">-</span>
+              </div>
+              <div id="previewOutput" class="markdown-body"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: SEARCH & GRAPH -->
+    <section class="tab-panel" id="tab-search">
+      <div class="search-graph-layout">
+        <div class="search-bar">
+          <input type="text" id="searchQueryInput" placeholder="Hybrid search (FTS5 BM25 + Vector + 1-Hop Wiki Graph RRF)…" style="flex:1; min-width:220px;">
+          <input type="text" id="searchPrefixInput" placeholder="Prefix (optional, e.g. /semantic)" style="width:190px;" class="mono">
+          <label class="small muted">Top K:</label>
+          <select id="searchTopK">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+          </select>
+          <button type="button" id="btnRunSearch" class="primary">Search</button>
+          <button type="button" id="btnReloadGraph">Reload Graph</button>
+        </div>
+        <div class="search-split">
+          <div class="scroll-col" id="searchResultsList">
+            <div class="card muted">Enter a query to run branch-isolated Graph-RRF hybrid search on <strong class="mono" id="searchBranchLabel">main</strong>.</div>
+          </div>
+          <div class="graph-container">
+            <div class="graph-toolbar">
+              <div class="toolbar-group">
+                <span class="small muted" id="graphStatsText">0 nodes · 0 wikilink edges</span>
+                <select id="graphTierFilter">
+                  <option value="all">All Tiers</option>
+                  <option value="core">core</option>
+                  <option value="semantic">semantic</option>
+                  <option value="procedural">procedural</option>
+                  <option value="episodic">episodic</option>
+                </select>
+              </div>
+              <div class="toolbar-group">
+                <button type="button" id="btnResetLayout">Reset Layout</button>
+              </div>
+            </div>
+            <div class="graph-stage">
+              <svg id="graphSvg" viewBox="0 0 820 520">
+                <defs>
+                  <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="15" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="var(--text-dim)"/>
+                  </marker>
+                  <marker id="arrowheadActive" markerWidth="8" markerHeight="6" refX="15" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="var(--accent)"/>
+                  </marker>
+                </defs>
+                <g id="graphEdgesLayer"></g>
+                <g id="graphNodesLayer"></g>
+              </svg>
+            </div>
+            <div class="graph-inspector" id="graphInspector">
+              <span class="muted small">Click any node to inspect links; drag nodes to rearrange; double-click to open in Editor.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: VCS & MERGE -->
+    <section class="tab-panel" id="tab-vcs">
+      <div class="grid-3">
+        <div class="col-pane">
+          <div class="pane-header">
+            <span>Commit History (<span id="vcsBranchLabel">main</span>)</span>
+            <button type="button" id="btnReloadCommits" style="padding:2px 8px;">Reload</button>
+          </div>
+          <div class="scroll-col" id="commitList"></div>
+        </div>
+
+        <div class="col-pane">
+          <div class="pane-header"><span>Merkle Tree Diff</span></div>
+          <div class="scroll-col">
+            <div class="card">
+              <div class="form-grid">
+                <div class="field">
+                  <label>Base Revision (branch or commit)</label>
+                  <input type="text" id="diffBaseInput" value="main" class="mono">
+                </div>
+                <div class="field">
+                  <label>Target Revision (branch or commit)</label>
+                  <input type="text" id="diffTargetInput" value="main" class="mono">
+                </div>
+              </div>
+              <div><button type="button" id="btnRunDiff" class="primary">Compare Revisions</button></div>
+            </div>
+            <div id="diffResultsList" style="display:flex; flex-direction:column; gap:8px;"></div>
+          </div>
+        </div>
+
+        <div class="col-pane">
+          <div class="pane-header"><span>3-Way Branch Merge</span></div>
+          <div class="scroll-col">
+            <div class="card">
+              <div class="field">
+                <label>Source Branch</label>
+                <select id="mergeSourceSelect"></select>
+              </div>
+              <div class="field">
+                <label>Target Branch</label>
+                <select id="mergeTargetSelect"></select>
+              </div>
+              <div class="field">
+                <label>Conflict Strategy</label>
+                <select id="mergeStrategySelect">
+                  <option value="auto">auto (fail cleanly on conflict)</option>
+                  <option value="ours">ours (prefer target branch)</option>
+                  <option value="theirs">theirs (prefer source branch)</option>
+                </select>
+              </div>
+              <div><button type="button" id="btnRunMerge" class="primary">Execute Merge</button></div>
+            </div>
+            <div id="mergeOutcomeBox"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: INGEST & CONSOLIDATE -->
+    <section class="tab-panel" id="tab-workflow">
+      <div class="grid-2">
+        <div class="col-pane">
+          <div class="pane-header"><span>Multi-Role Knowledge Ingest (Auto-Structured &amp; Linked)</span></div>
+          <div class="scroll-col">
+            <div class="card">
+              <div class="form-grid">
+                <div class="field">
+                  <label>Role</label>
+                  <select id="ingestRole">
+                    <option value="dev">dev (/semantic or /procedural)</option>
+                    <option value="pm">pm (Product Requirements)</option>
+                    <option value="bot">bot (/episodic)</option>
+                    <option value="qa">qa (Verification)</option>
+                    <option value="ops">ops (Operations SOP)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Title (optional)</label>
+                  <input type="text" id="ingestTitle" placeholder="Auto-derived if blank">
+                </div>
+                <div class="field">
+                  <label>Path Override (optional)</label>
+                  <input type="text" id="ingestPath" class="mono" placeholder="/semantic/note.md">
+                </div>
+                <div class="field">
+                  <label>Tier Override (optional)</label>
+                  <select id="ingestTier">
+                    <option value="">auto by role</option>
+                    <option value="core">core</option>
+                    <option value="semantic">semantic</option>
+                    <option value="procedural">procedural</option>
+                    <option value="episodic">episodic</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Tags (comma-separated)</label>
+                  <input type="text" id="ingestTags" placeholder="architecture, bugfix">
+                </div>
+                <div class="field">
+                  <label>Importance (0.0 - 1.0)</label>
+                  <input type="number" id="ingestImp" min="0" max="1" step="0.05" value="0.7">
+                </div>
+                <div class="field full">
+                  <div class="checkbox-row">
+                    <label><input type="checkbox" id="ingestDraft"> Write to draft/&lt;role&gt;-inbox</label>
+                    <label><input type="checkbox" id="ingestCommit" checked> Commit immediately</label>
+                    <label><input type="checkbox" id="ingestUseLlm"> Use LLM enrichment</label>
+                  </div>
+                </div>
+                <div class="field full">
+                  <label>Raw Note / Transcript / Observation</label>
+                  <textarea id="ingestText" rows="6" placeholder="Paste rough engineer notes, bug postmortem, or PM spec…"></textarea>
+                </div>
+              </div>
+              <div><button type="button" id="btnRunIngest" class="primary">Ingest Note</button></div>
+            </div>
+            <pre class="out-box" id="ingestResultBox">No ingest run yet.</pre>
+          </div>
+        </div>
+
+        <div class="col-pane">
+          <div class="pane-header"><span>Cold-Path Sleep Consolidation (Isolated Branch Worker)</span></div>
+          <div class="scroll-col">
+            <div class="card">
+              <div class="form-grid">
+                <div class="field">
+                  <label>Consolidation Branch (optional)</label>
+                  <input type="text" id="consBranch" class="mono" placeholder="consolidate/auto-...">
+                </div>
+                <div class="field">
+                  <label>Episodic Prefix (optional)</label>
+                  <input type="text" id="consPrefix" class="mono" placeholder="/episodic">
+                </div>
+                <div class="field">
+                  <label>Max Notes</label>
+                  <input type="number" id="consMaxNotes" min="1" max="500" value="50">
+                </div>
+                <div class="field">
+                  <label>Min Importance</label>
+                  <input type="number" id="consMinImp" min="0" max="1" step="0.05" value="0.0">
+                </div>
+                <div class="field">
+                  <label>Merge Strategy</label>
+                  <select id="consStrategy">
+                    <option value="auto">auto</option>
+                    <option value="ours">ours</option>
+                    <option value="theirs">theirs</option>
+                  </select>
+                </div>
+                <div class="field" style="justify-content:end;">
+                  <div class="checkbox-row">
+                    <label><input type="checkbox" id="consDryRun" checked> Dry Run</label>
+                    <label><input type="checkbox" id="consAutoMerge"> Auto-Merge</label>
+                  </div>
+                </div>
+                <div class="field full">
+                  <div class="checkbox-row">
+                    <label><input type="checkbox" id="consArchive"> Archive processed episodes</label>
+                    <label><input type="checkbox" id="consDeleteBranch"> Delete temp branch after merge</label>
+                    <label><input type="checkbox" id="consUseLlm"> Use LLM synthesis</label>
+                  </div>
+                </div>
+              </div>
+              <div><button type="button" id="btnRunConsolidate" class="primary">Run Consolidation</button></div>
+            </div>
+            <pre class="out-box" id="consResultBox">No consolidation run yet.</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: CORE COMPILER, GC & SSE -->
+    <section class="tab-panel" id="tab-ops">
+      <div class="grid-2">
+        <div class="col-pane">
+          <div class="pane-header"><span>/core System Prompt Compiler &amp; Storage GC</span></div>
+          <div class="scroll-col">
+            <div class="card">
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                <label class="small muted">Max Tokens:</label>
+                <input type="number" id="compileBudgetInput" min="64" max="32000" value="2000" style="width:110px;">
+                <button type="button" id="btnRunCompile" class="primary">Compile /core</button>
+                <button type="button" id="btnCopyCompiled">Copy Prompt</button>
+                <button type="button" id="btnRunGc">Run Storage GC</button>
+              </div>
+              <div class="small muted" id="compileMetaText">Click "Compile /core" to generate deterministic active rules context.</div>
+              <pre class="out-box" id="compileOutputBox" style="max-height:300px;"></pre>
+            </div>
+            <div class="card">
+              <div class="small" style="font-weight:600;">Daemon &amp; GC Info</div>
+              <pre class="out-box" id="gcOutputBox">Click "Run Storage GC" to sweep unreachable blobs, trees, and commits.</pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-pane">
+          <div class="pane-header">
+            <span>Live SSE Events (/v1/events)</span>
+            <div class="toolbar-group">
+              <label class="small" style="display:inline-flex; gap:4px; align-items:center;">
+                <input type="checkbox" id="sseBranchOnly" checked> Branch only
+              </label>
+              <button type="button" id="btnToggleSse" style="padding:2px 8px;">Pause</button>
+              <button type="button" id="btnClearSse" style="padding:2px 8px;">Clear</button>
+            </div>
+          </div>
+          <div class="scroll-col" id="sseLogList">
+            <div class="muted small">Listening for daemon events (writes, commits, branches, merges, ingests, consolidations)…</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Commit Modal -->
+  <div class="modal-backdrop" id="commitModal">
+    <div class="modal">
+      <h3>Commit Staged Workspace Changes</h3>
+      <div class="field">
+        <label>Target Branch</label>
+        <input type="text" id="commitBranchReadonly" readonly class="mono">
+      </div>
+      <div class="field">
+        <label>Commit Message</label>
+        <input type="text" id="commitMsgInput" placeholder="e.g. docs: update memory rules">
+      </div>
+      <div class="field">
+        <label>Author</label>
+        <input type="text" id="commitAuthorInput" value="web-console">
+      </div>
+      <div class="modal-actions">
+        <button type="button" data-close-modal="commitModal">Cancel</button>
+        <button type="button" id="btnSubmitCommit" class="primary">Commit</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Branch Modal -->
+  <div class="modal-backdrop" id="branchModal">
+    <div class="modal">
+      <h3>Create Branch</h3>
+      <div class="field">
+        <label>New Branch Name</label>
+        <input type="text" id="newBranchName" class="mono" placeholder="exp/feature-idea">
+      </div>
+      <div class="field">
+        <label>Base Revision (branch name or commit SHA)</label>
+        <input type="text" id="newBranchFrom" class="mono" value="main">
+      </div>
+      <div class="modal-actions">
+        <button type="button" data-close-modal="branchModal">Cancel</button>
+        <button type="button" id="btnSubmitBranch" class="primary">Create Branch</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bearer Auth Modal -->
+  <div class="modal-backdrop" id="authModal">
+    <div class="modal">
+      <h3>Daemon Bearer Authentication</h3>
+      <div class="small muted" id="authPromptHint">
+        If mem-daemon was started with <span class="mono">--token</span>, enter the token below. It is saved only in this browser's <span class="mono">localStorage</span>.
+      </div>
+      <div class="field">
+        <label>Bearer Token</label>
+        <input type="password" id="authTokenInput" placeholder="Leave blank for open local daemon">
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="btnClearAuth">Clear Token</button>
+        <button type="button" data-close-modal="authModal">Cancel</button>
+        <button type="button" id="btnSaveAuth" class="primary">Save &amp; Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastHost"></div>
+
+  <script>
+    (() => {
+      const TOKEN_KEY = 'engram_daemon_token';
+      const THEME_KEY = 'engram_ui_theme';
+      const SSE_EVENTS = [
+        'node_written', 'node_deleted', 'committed',
+        'branch_created', 'branch_deleted', 'rewound',
+        'merged', 'ingested', 'consolidated'
+      ];
+
+      const state = {
+        branch: 'main',
+        token: localStorage.getItem(TOKEN_KEY) || '',
+        theme: localStorage.getItem(THEME_KEY) || 'dark',
+        branches: [],
+        nodes: [],
+        activePath: null,
+        tierFilter: 'all',
+        textFilter: '',
+        graph: { nodes: [], edges: [] },
+        graphPos: {},
+        selectedGraphNode: null,
+        sseSource: null,
+        ssePaused: false,
+        authPrompted: false
+      };
+
+      const $ = (id) => document.getElementById(id);
+
+      function escapeHtml(str) {
+        return String(str ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function toast(message, kind = 'info') {
+        const el = document.createElement('div');
+        el.className = `toast ${kind === 'err' ? 'err' : kind === 'ok' ? 'ok' : ''}`;
+        el.textContent = message;
+        $('toastHost').appendChild(el);
+        setTimeout(() => el.remove(), 4200);
+      }
+
+      function applyTheme(theme) {
+        state.theme = theme === 'light' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', state.theme);
+        localStorage.setItem(THEME_KEY, state.theme);
+        $('btnTheme').textContent = state.theme === 'dark' ? 'Light UI' : 'Dark UI';
+      }
+
+      async function api(path, opts = {}) {
+        const headers = new Headers(opts.headers || {});
+        if (state.token) {
+          headers.set('Authorization', `Bearer ${state.token}`);
+        }
+        let body = opts.body;
+        if (body !== undefined && typeof body !== 'string') {
+          headers.set('Content-Type', 'application/json');
+          body = JSON.stringify(body);
+        }
+        const res = await fetch(path, { ...opts, headers, body });
+        const text = await res.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+        if (!res.ok) {
+          if (res.status === 401 && !state.authPrompted) {
+            state.authPrompted = true;
+            openModal('authModal');
+            $('authTokenInput').value = state.token;
+          }
+          const msg = (data && typeof data === 'object' && data.error) ? data.error : `HTTP ${res.status}`;
+          throw new Error(msg);
+        }
+        return data;
+      }
+
+      function openModal(id) { $(id).classList.add('open'); }
+      function closeModal(id) { $(id).classList.remove('open'); }
+
+      function setConn(kind, text) {
+        $('connDot').className = `dot ${kind}`;
+        $('connText').textContent = text;
+      }
+
+      function tierFromPath(p) {
+        if (!p) return 'semantic';
+        if (p.startsWith('/core')) return 'core';
+        if (p.startsWith('/procedural')) return 'procedural';
+        if (p.startsWith('/episodic')) return 'episodic';
+        return 'semantic';
+      }
+
+      function tierColor(tier) {
+        switch (tier) {
+          case 'core': return 'var(--tier-core)';
+          case 'procedural': return 'var(--tier-procedural)';
+          case 'episodic': return 'var(--tier-episodic)';
+          default: return 'var(--tier-semantic)';
+        }
+      }
+
+      function fmtTime(ms) {
+        if (!ms) return '-';
+        try { return new Date(ms).toLocaleString(); } catch { return String(ms); }
+      }
+
+      // ---------- Safe Markdown + [[Wikilink]] Renderer ----------
+      function renderInlineMarkdown(escapedLine) {
+        const codeTokens = [];
+        let out = escapedLine.replace(/`([^`]+)`/g, (_, code) => {
+          const idx = codeTokens.length;
+          codeTokens.push(`<code>${code}</code>`);
+          return `\u0000CODE${idx}\u0000`;
+        });
+        out = out.replace(/\[\[([^\]]+)\]\]/g, (_, inner) => {
+          const parts = inner.split('|');
+          const rawTarget = parts[0].trim();
+          const label = (parts[1] || rawTarget).trim();
+          const resolved = resolveWikiInBranch(rawTarget);
+          const cls = resolved ? 'wikilink-chip' : 'wikilink-chip missing';
+          return `<button type="button" class="${cls}" data-wikilink="${escapeHtml(rawTarget)}" title="${resolved ? escapeHtml(resolved) : 'Not in branch — click to create'}">${escapeHtml(label)}</button>`;
+        });
+        out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+        out = out.replace(/\u0000CODE(\d+)\u0000/g, (_, idx) => codeTokens[Number(idx)] || '');
+        return out;
+      }
+
+      function renderMarkdownSafe(raw) {
+        if (!raw) return '<p class="muted">Empty document.</p>';
+        const lines = raw.replace(/\r\n/g, '\n').split('\n');
+        let idx = 0;
+        const html = [];
+
+        if (lines[0]?.trim() === '---') {
+          let end = -1;
+          for (let i = 1; i < lines.length; i++) {
+            if (lines[i].trim() === '---') { end = i; break; }
+          }
+          if (end > 0) {
+            html.push('<div class="fm-box">');
+            for (let i = 1; i < end; i++) {
+              const ln = lines[i].trim();
+              if (!ln) continue;
+              const colon = ln.indexOf(':');
+              if (colon > 0) {
+                const k = escapeHtml(ln.slice(0, colon).trim());
+                const v = escapeHtml(ln.slice(colon + 1).trim());
+                html.push(`<span><strong class="muted">${k}:</strong> <span class="mono">${v}</span></span>`);
+              } else {
+                html.push(`<span class="mono muted">${escapeHtml(ln)}</span>`);
+              }
+            }
+            html.push('</div>');
+            idx = end + 1;
+          }
+        }
+
+        let inFence = false;
+        let fenceBuf = [];
+        let listType = null;
+
+        const closeList = () => {
+          if (listType) {
+            html.push(`</${listType}>`);
+            listType = null;
+          }
+        };
+
+        for (; idx < lines.length; idx++) {
+          const line = lines[idx];
+          if (line.trim().startsWith('```')) {
+            closeList();
+            if (!inFence) {
+              inFence = true;
+              fenceBuf = [];
+            } else {
+              html.push(`<pre><code>${escapeHtml(fenceBuf.join('\n'))}</code></pre>`);
+              inFence = false;
+            }
+            continue;
+          }
+          if (inFence) {
+            fenceBuf.push(line);
+            continue;
+          }
+
+          const trimmed = line.trim();
+          if (!trimmed) { closeList(); continue; }
+          if (trimmed === '---' || trimmed === '***') {
+            closeList();
+            html.push('<hr style="border:none;border-top:1px solid var(--border);margin:10px 0;">');
+            continue;
+          }
+
+          const hMatch = /^(#{1,4})\s+(.*)$/.exec(trimmed);
+          if (hMatch) {
+            closeList();
+            const level = hMatch[1].length;
+            html.push(`<h${level}>${renderInlineMarkdown(escapeHtml(hMatch[2]))}</h${level}>`);
+            continue;
+          }
+
+          if (trimmed.startsWith('> ')) {
+            closeList();
+            html.push(`<blockquote>${renderInlineMarkdown(escapeHtml(trimmed.slice(2)))}</blockquote>`);
+            continue;
+          }
+
+          const ulMatch = /^[-*]\s+(.*)$/.exec(trimmed);
+          if (ulMatch) {
+            if (listType !== 'ul') { closeList(); html.push('<ul>'); listType = 'ul'; }
+            html.push(`<li>${renderInlineMarkdown(escapeHtml(ulMatch[1]))}</li>`);
+            continue;
+          }
+
+          const olMatch = /^\d+\.\s+(.*)$/.exec(trimmed);
+          if (olMatch) {
+            if (listType !== 'ol') { closeList(); html.push('<ol>'); listType = 'ol'; }
+            html.push(`<li>${renderInlineMarkdown(escapeHtml(olMatch[1]))}</li>`);
+            continue;
+          }
+
+          closeList();
+          html.push(`<p>${renderInlineMarkdown(escapeHtml(line))}</p>`);
+        }
+
+        if (inFence) {
+          html.push(`<pre><code>${escapeHtml(fenceBuf.join('\n'))}</code></pre>`);
+        }
+        closeList();
+        return html.join('\n');
+      }
+
+      function resolveWikiInBranch(targetRaw) {
+        const clean = String(targetRaw || '').trim().replace(/^\.\//, '').toLowerCase();
+        if (!clean) return null;
+        const noExt = clean.endsWith('.md') ? clean.slice(0, -3) : clean;
+        const noSlash = clean.replace(/^\/+/, '');
+        const noSlashNoExt = noSlash.endsWith('.md') ? noSlash.slice(0, -3) : noSlash;
+
+        for (const n of state.nodes) {
+          const p = n.path.toLowerCase();
+          const pNoExt = p.endsWith('.md') ? p.slice(0, -3) : p;
+          const pRel = p.replace(/^\/+/, '');
+          const pRelNoExt = pRel.endsWith('.md') ? pRel.slice(0, -3) : pRel;
+          const fname = p.split('/').pop() || '';
+          const stem = fname.endsWith('.md') ? fname.slice(0, -3) : fname;
+          if (
+            p === clean || pNoExt === noExt ||
+            pRel === noSlash || pRelNoExt === noSlashNoExt ||
+            fname === clean || stem === noExt
+          ) {
+            return n.path;
+          }
+        }
+        for (const g of state.graph.nodes || []) {
+          if ((g.title || '').trim().toLowerCase() === clean) return g.path;
+        }
+        return null;
+      }
+
+      // ---------- Health, Branches, Status ----------
+      async function refreshHealth() {
+        try {
+          const h = await api('/health');
+          setConn('ok', `OK · v${h.version}${h.auth_required ? ' · auth' : ''}`);
+        } catch (err) {
+          setConn('err', 'Offline');
+        }
+      }
+
+      async function loadBranches() {
+        const list = await api('/v1/branches');
+        state.branches = list || [];
+        if (!state.branches.some((b) => b.branch === state.branch) && state.branches.length > 0) {
+          state.branch = state.branches[0].branch;
+        }
+        const optsHtml = state.branches
+          .map((b) => `<option value="${escapeHtml(b.branch)}" ${b.branch === state.branch ? 'selected' : ''}>${escapeHtml(b.branch)} (${escapeHtml((b.commit_id || '').slice(0, 7))})</option>`)
+          .join('');
+        $('branchSelect').innerHTML = optsHtml;
+        $('btnDelBranch').disabled = state.branch === 'main';
+
+        const plainOpts = state.branches
+          .map((b) => `<option value="${escapeHtml(b.branch)}">${escapeHtml(b.branch)}</option>`)
+          .join('');
+        $('mergeSourceSelect').innerHTML = plainOpts;
+        $('mergeTargetSelect').innerHTML = plainOpts;
+        $('mergeTargetSelect').value = 'main';
+        if (state.branches.length > 1) {
+          const alt = state.branches.find((b) => b.branch !== 'main');
+          if (alt) $('mergeSourceSelect').value = alt.branch;
+        }
+      }
+
+      async function refreshStatus() {
+        const st = await api(`/v1/status?branch=${encodeURIComponent(state.branch)}`);
+        $('statHead').textContent = (st.head_commit || '').slice(0, 10) || '-';
+        $('statNodes').textContent = String(st.active_nodes ?? 0);
+        const blobs = st.storage?.blobs ?? 0;
+        const commits = st.storage?.commits ?? 0;
+        $('statStorage').textContent = `${blobs}/${commits}`;
+        const staged = st.staged_changes ?? 0;
+        if (staged > 0) {
+          $('statStagedBtn').style.display = 'inline-block';
+          $('statStagedBtn').textContent = `${staged} staged`;
+        } else {
+          $('statStagedBtn').style.display = 'none';
+        }
+        $('searchBranchLabel').textContent = state.branch;
+        $('vcsBranchLabel').textContent = state.branch;
+      }
+
+      // ---------- Tab 1: Files & Editor ----------
+      async function loadNodes() {
+        const list = await api(`/v1/nodes?branch=${encodeURIComponent(state.branch)}`);
+        state.nodes = list || [];
+        renderFileList();
+      }
+
+      function renderFileList() {
+        const q = state.textFilter.trim().toLowerCase();
+        const filtered = state.nodes.filter((n) => {
+          const tier = tierFromPath(n.path);
+          if (state.tierFilter !== 'all' && tier !== state.tierFilter) return false;
+          if (!q) return true;
+          const inPath = n.path.toLowerCase().includes(q);
+          const inTags = (n.tags || []).some((t) => t.toLowerCase().includes(q));
+          return inPath || inTags;
+        });
+
+        if (filtered.length === 0) {
+          $('fileList').innerHTML = '<div class="muted small" style="padding:12px;">No matching notes in this branch.</div>';
+          return;
+        }
+
+        $('fileList').innerHTML = filtered.map((n) => {
+          const tier = tierFromPath(n.path);
+          const active = n.path === state.activePath ? 'active' : '';
+          const tagsHtml = (n.tags || []).slice(0, 4).map((t) => `<span class="tag-pill">#${escapeHtml(t)}</span>`).join('');
+          return `
+            <button type="button" class="file-item ${active}" data-open-path="${escapeHtml(n.path)}">
+              <div class="file-item-row">
+                <span class="file-path" title="${escapeHtml(n.path)}">${escapeHtml(n.path)}</span>
+                <span class="tier-badge tier-${tier}">${tier}</span>
+              </div>
+              <div class="file-item-row small muted">
+                <div class="tag-row">${tagsHtml}</div>
+                <span class="mono">${Number(n.importance ?? 0).toFixed(2)}</span>
+              </div>
+            </button>
+          `;
+        }).join('');
+      }
+
+      async function openNote(path) {
+        const data = await api(`/v1/node?path=${encodeURIComponent(path)}&branch=${encodeURIComponent(state.branch)}`);
+        state.activePath = data.path;
+        $('editPath').value = data.path;
+        $('editImportance').value = Number(data.metadata?.importance ?? 0.7).toFixed(2);
+        $('editTags').value = (data.metadata?.tags || []).join(', ');
+        $('editContent').value = data.content || '';
+        $('editBlobBadge').textContent = data.blob_id ? `blob:${data.blob_id.slice(0, 10)}` : '-';
+        $('editUpdatedBadge').textContent = fmtTime(data.metadata?.updated_at_ms);
+        $('previewOutput').innerHTML = renderMarkdownSafe(data.content || '');
+        renderFileList();
+      }
+
+      function startNewNote(presetPath = '') {
+        state.activePath = null;
+        const p = presetPath || '/semantic/new-note.md';
+        $('editPath').value = p;
+        $('editImportance').value = '0.70';
+        $('editTags').value = '';
+        const stem = (p.split('/').pop() || 'New Note').replace(/\.md$/i, '');
+        const tpl = `---\ntitle: ${stem}\ntags: []\n---\n\n# ${stem}\n\n`;
+        $('editContent').value = tpl;
+        $('editBlobBadge').textContent = 'unsaved draft';
+        $('editUpdatedBadge').textContent = '-';
+        $('previewOutput').innerHTML = renderMarkdownSafe(tpl);
+        renderFileList();
+        $('editContent').focus();
+      }
+
+      async function stageCurrentNote() {
+        const path = $('editPath').value.trim();
+        if (!path) throw new Error('Virtual path is required');
+        const importance = Math.max(0, Math.min(1, parseFloat($('editImportance').value || '0.7') || 0.7));
+        const tags = $('editTags').value.split(',').map((s) => s.trim()).filter(Boolean);
+        const content = $('editContent').value;
+        const res = await api('/v1/node', {
+          method: 'PUT',
+          body: { path, content, branch: state.branch, tags, importance }
+        });
+        toast(`Staged ${res.path} on ${res.branch}`, 'ok');
+        state.activePath = res.path;
+        await Promise.all([refreshStatus(), loadNodes(), openNote(res.path), loadGraph()]);
+      }
+
+      async function deleteCurrentNote() {
+        const path = $('editPath').value.trim();
+        if (!path) return;
+        if (!confirm(`Delete ${path} from branch "${state.branch}" workspace?`)) return;
+        await api(`/v1/node?path=${encodeURIComponent(path)}&branch=${encodeURIComponent(state.branch)}`, {
+          method: 'DELETE'
+        });
+        toast(`Deleted ${path}`, 'ok');
+        state.activePath = null;
+        $('editPath').value = '';
+        $('editContent').value = '';
+        $('previewOutput').innerHTML = '';
+        await Promise.all([refreshStatus(), loadNodes(), loadGraph()]);
+      }
+
+      // ---------- Tab 2: Search & SVG Wiki Graph ----------
+      async function runSearch() {
+        const query = $('searchQueryInput').value.trim();
+        if (!query) {
+          toast('Enter a search query first', 'err');
+          return;
+        }
+        const prefix = $('searchPrefixInput').value.trim() || null;
+        const top_k = Number($('searchTopK').value || 10);
+        const hits = await api('/v1/search', {
+          method: 'POST',
+          body: { query, branch: state.branch, prefix, top_k }
+        });
+        if (!hits || hits.length === 0) {
+          $('searchResultsList').innerHTML = `<div class="card muted">No matches for "${escapeHtml(query)}" on branch <span class="mono">${escapeHtml(state.branch)}</span>.</div>`;
+          return;
+        }
+        $('searchResultsList').innerHTML = hits.map((h, i) => {
+          const tier = tierFromPath(h.path);
+          const links = [...(h.outlinks || []).map((l) => ({ dir: '→', p: l })), ...(h.backlinks || []).map((l) => ({ dir: '←', p: l }))];
+          const linkChips = links.map((x) => `<button type="button" class="wikilink-chip" data-jump-path="${escapeHtml(x.p)}">${x.dir} ${escapeHtml(x.p)}</button>`).join(' ');
+          return `
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+                  <span class="mono small muted">#${i + 1}</span>
+                  <span class="tier-badge tier-${tier}">${tier}</span>
+                  <strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(h.title || h.path)}</strong>
+                </div>
+                <span class="mono small muted">score ${Number(h.score).toFixed(4)}</span>
+              </div>
+              <div class="small mono muted" style="display:flex;gap:10px;flex-wrap:wrap;">
+                <span>${escapeHtml(h.path)}</span>
+                <span>BM25:${h.bm25_rank ?? '-'}</span>
+                <span>Vec:${h.vector_rank ?? '-'}</span>
+                <span>Graph:${Number(h.graph_score ?? 0).toFixed(3)}</span>
+              </div>
+              ${h.heading_path ? `<div class="small muted">§ ${escapeHtml(h.heading_path)} (L${h.start_line}-${h.end_line})</div>` : ''}
+              <pre class="out-box" style="max-height:140px;">${escapeHtml(h.snippet || '')}</pre>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
+                <div style="display:flex;gap:4px;flex-wrap:wrap;">${linkChips}</div>
+                <button type="button" data-jump-path="${escapeHtml(h.path)}">Open in Editor</button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      async function loadGraph(resetLayout = false) {
+        const data = await api(`/v1/graph?branch=${encodeURIComponent(state.branch)}`);
+        state.graph = data || { branch: state.branch, nodes: [], edges: [] };
+        if (resetLayout) state.graphPos = {};
+        computeGraphLayout();
+        renderGraph();
+      }
+
+      function computeGraphLayout() {
+        const nodes = state.graph.nodes || [];
+        const edges = state.graph.edges || [];
+        const W = 820, H = 520, cx = W / 2, cy = H / 2;
+        if (nodes.length === 0) return;
+
+        // Initialize missing positions deterministically around a circle
+        const unpositioned = nodes.filter((n) => !state.graphPos[n.id]);
+        if (unpositioned.length === nodes.length) {
+          const R = Math.min(W, H) * 0.34;
+          nodes.forEach((n, idx) => {
+            const ang = (2 * Math.PI * idx) / Math.max(1, nodes.length) - Math.PI / 2;
+            state.graphPos[n.id] = {
+              x: cx + R * Math.cos(ang),
+              y: cy + R * Math.sin(ang)
+            };
+          });
+        } else {
+          nodes.forEach((n, idx) => {
+            if (!state.graphPos[n.id]) {
+              const ang = (2 * Math.PI * idx) / Math.max(1, nodes.length);
+              state.graphPos[n.id] = { x: cx + 110 * Math.cos(ang), y: cy + 110 * Math.sin(ang) };
+            }
+          });
+        }
+
+        if (nodes.length > 1 && unpositioned.length > 0) {
+          const disp = {};
+          const k = Math.sqrt((W * H) / Math.max(4, nodes.length)) * 0.65;
+          for (let iter = 0; iter < 140; iter++) {
+            for (const n of nodes) disp[n.id] = { dx: 0, dy: 0 };
+            for (let i = 0; i < nodes.length; i++) {
+              for (let j = i + 1; j < nodes.length; j++) {
+                const a = state.graphPos[nodes[i].id];
+                const b = state.graphPos[nodes[j].id];
+                let dx = a.x - b.x;
+                let dy = a.y - b.y;
+                let d2 = dx * dx + dy * dy;
+                if (d2 < 1) { dx = 1; dy = 1; d2 = 2; }
+                const d = Math.sqrt(d2);
+                const f = (k * k) / d * 0.45;
+                const fx = (dx / d) * f, fy = (dy / d) * f;
+                disp[nodes[i].id].dx += fx;
+                disp[nodes[i].id].dy += fy;
+                disp[nodes[j].id].dx -= fx;
+                disp[nodes[j].id].dy -= fy;
+              }
+            }
+            for (const e of edges) {
+              const a = state.graphPos[e.source];
+              const b = state.graphPos[e.target];
+              if (!a || !b) continue;
+              const dx = b.x - a.x;
+              const dy = b.y - a.y;
+              const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+              const f = (d * d) / k * 0.14;
+              const fx = (dx / d) * f, fy = (dy / d) * f;
+              disp[e.source].dx += fx; disp[e.source].dy += fy;
+              disp[e.target].dx -= fx; disp[e.target].dy -= fy;
+            }
+            const stepCap = Math.max(2, 18 * (1 - iter / 145));
+            for (const n of nodes) {
+              const p = state.graphPos[n.id];
+              const v = disp[n.id];
+              v.dx += (cx - p.x) * 0.04;
+              v.dy += (cy - p.y) * 0.04;
+              const mag = Math.max(0.001, Math.sqrt(v.dx * v.dx + v.dy * v.dy));
+              const step = Math.min(mag, stepCap);
+              p.x = Math.max(46, Math.min(W - 46, p.x + (v.dx / mag) * step));
+              p.y = Math.max(36, Math.min(H - 36, p.y + (v.dy / mag) * step));
+            }
+          }
+        }
+      }
+
+      function renderGraph() {
+        const tierFilter = $('graphTierFilter').value;
+        const allNodes = state.graph.nodes || [];
+        const visibleNodes = allNodes.filter((n) => tierFilter === 'all' || n.tier === tierFilter);
+        const visibleSet = new Set(visibleNodes.map((n) => n.id));
+        const visibleEdges = (state.graph.edges || []).filter((e) => visibleSet.has(e.source) && visibleSet.has(e.target));
+
+        $('graphStatsText').textContent = `${visibleNodes.length} nodes · ${visibleEdges.length} wikilink edges`;
+
+        const sel = state.selectedGraphNode;
+        const connectedToSel = new Set();
+        if (sel) {
+          connectedToSel.add(sel);
+          visibleEdges.forEach((e) => {
+            if (e.source === sel) connectedToSel.add(e.target);
+            if (e.target === sel) connectedToSel.add(e.source);
+          });
+        }
+
+        $('graphEdgesLayer').innerHTML = visibleEdges.map((e) => {
+          const p1 = state.graphPos[e.source];
+          const p2 = state.graphPos[e.target];
+          if (!p1 || !p2) return '';
+          const isHot = sel && (e.source === sel || e.target === sel);
+          const stroke = isHot ? 'var(--accent)' : 'var(--border-strong)';
+          const opacity = sel ? (isHot ? 0.95 : 0.2) : 0.72;
+          const marker = isHot ? 'url(#arrowheadActive)' : 'url(#arrowhead)';
+          return `<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${stroke}" stroke-width="${isHot ? 2.1 : 1.3}" stroke-opacity="${opacity}" marker-end="${marker}" data-edge-src="${escapeHtml(e.source)}" data-edge-dst="${escapeHtml(e.target)}"/>`;
+        }).join('');
+
+        $('graphNodesLayer').innerHTML = visibleNodes.map((n) => {
+          const p = state.graphPos[n.id];
+          if (!p) return '';
+          const deg = (n.in_degree || 0) + (n.out_degree || 0);
+          const r = 8 + Math.min(9, deg * 1.6);
+          const isSel = sel === n.id;
+          const dimmed = sel && !connectedToSel.has(n.id);
+          const shortTitle = (n.title || n.path).slice(0, 22);
+          return `
+            <g class="graph-node" data-node-id="${escapeHtml(n.id)}" transform="translate(${p.x.toFixed(1)}, ${p.y.toFixed(1)})" style="opacity:${dimmed ? 0.28 : 1};">
+              <circle r="${r}" fill="${tierColor(n.tier)}" fill-opacity="0.24" stroke="${isSel ? 'var(--text)' : tierColor(n.tier)}" stroke-width="${isSel ? 2.6 : 1.8}"/>
+              <text x="0" y="${r + 13}" text-anchor="middle">${escapeHtml(shortTitle)}</text>
+            </g>
+          `;
+        }).join('');
+
+        renderGraphInspector();
+      }
+
+      function renderGraphInspector() {
+        const node = (state.graph.nodes || []).find((n) => n.id === state.selectedGraphNode);
+        if (!node) {
+          $('graphInspector').innerHTML = '<span class="muted small">Click any node to inspect links; drag nodes to rearrange; double-click to open in Editor.</span>';
+          return;
+        }
+        const outEdges = (state.graph.edges || []).filter((e) => e.source === node.id).map((e) => e.target);
+        const inEdges = (state.graph.edges || []).filter((e) => e.target === node.id).map((e) => e.source);
+        $('graphInspector').innerHTML = `
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;">
+            <span class="tier-badge tier-${escapeHtml(node.tier)}">${escapeHtml(node.tier)}</span>
+            <strong>${escapeHtml(node.title)}</strong>
+            <span class="mono small muted">${escapeHtml(node.path)}</span>
+            <span class="small muted">in:${inEdges.length} · out:${outEdges.length} · imp:${Number(node.importance).toFixed(2)}</span>
+          </div>
+          <button type="button" class="primary" data-jump-path="${escapeHtml(node.path)}">Open in Editor</button>
+        `;
+      }
+
+      // ---------- Tab 3: VCS & Merge ----------
+      async function loadCommits() {
+        const commits = await api(`/v1/commits?branch=${encodeURIComponent(state.branch)}&limit=50`);
+        if (!commits || commits.length === 0) {
+          $('commitList').innerHTML = '<div class="muted small">No commits yet on this branch.</div>';
+          return;
+        }
+        $('commitList').innerHTML = commits.map((c, idx) => {
+          const cid = c.commit_id || '';
+          const parents = (c.parent_ids || []).map((p) => String(p).slice(0, 7));
+          const isMerge = parents.length > 1;
+          return `
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <span class="mono" style="color:var(--accent);font-weight:600;">${escapeHtml(cid.slice(0, 10))}</span>
+                  ${idx === 0 ? '<span class="tier-badge tier-semantic">HEAD</span>' : ''}
+                  ${isMerge ? '<span class="tier-badge tier-episodic">MERGE</span>' : ''}
+                </div>
+                <span class="small muted">${escapeHtml(fmtTime(c.created_at_ms))}</span>
+              </div>
+              <div style="font-weight:500;">${escapeHtml(c.message)}</div>
+              <div class="small muted" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <span>by <strong>${escapeHtml(c.author)}</strong>${parents.length ? ` · parents: <span class="mono">${escapeHtml(parents.join(', '))}</span>` : ' · root'}</span>
+                ${idx > 0 ? `<button type="button" class="danger" data-rewind-cid="${escapeHtml(cid)}" style="padding:3px 8px;">Rewind Here</button>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      async function runDiff() {
+        const base = $('diffBaseInput').value.trim();
+        const target = $('diffTargetInput').value.trim();
+        if (!base || !target) return toast('Provide both base and target revisions', 'err');
+        const entries = await api(`/v1/diff?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`);
+        if (!entries || entries.length === 0) {
+          $('diffResultsList').innerHTML = '<div class="card muted">No differences between revisions.</div>';
+          return;
+        }
+        $('diffResultsList').innerHTML = entries.map((d) => {
+          const cls = d.kind === 'added' ? 'diff-added' : d.kind === 'deleted' ? 'diff-deleted' : 'diff-modified';
+          return `
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <span class="mono">${escapeHtml(d.path)}</span>
+                <strong class="${cls} mono" style="text-transform:uppercase;">${escapeHtml(d.kind)}</strong>
+              </div>
+              <div class="small mono muted">
+                ${d.old_blob_id ? `old: ${escapeHtml(d.old_blob_id.slice(0, 10))}` : 'old: none'}
+                →
+                ${d.new_blob_id ? `new: ${escapeHtml(d.new_blob_id.slice(0, 10))}` : 'new: none'}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      async function runMerge() {
+        const source = $('mergeSourceSelect').value;
+        const target = $('mergeTargetSelect').value;
+        const strategy = $('mergeStrategySelect').value;
+        if (!source || !target) return;
+        const res = await api('/v1/merge', {
+          method: 'POST',
+          body: { source, target, strategy }
+        });
+        $('mergeOutcomeBox').innerHTML = `<pre class="out-box">${escapeHtml(JSON.stringify(res, null, 2))}</pre>`;
+        if (res.outcome === 'conflict') {
+          toast(`Merge conflict between ${source} and ${target}`, 'err');
+        } else {
+          toast(`Merged ${source} → ${target} (${res.outcome})`, 'ok');
+          await refreshBranchData();
+        }
+      }
+
+      // ---------- Tab 4: Ingest & Consolidate ----------
+      async function runIngest() {
+        const text = $('ingestText').value.trim();
+        if (!text) return toast('Enter note text to ingest', 'err');
+        const tags = $('ingestTags').value.split(',').map((s) => s.trim()).filter(Boolean);
+        const body = {
+          text,
+          role: $('ingestRole').value,
+          branch: state.branch,
+          draft: $('ingestDraft').checked,
+          commit: $('ingestCommit').checked,
+          use_llm: $('ingestUseLlm').checked,
+          importance: parseFloat($('ingestImp').value || '0.7') || 0.7
+        };
+        if ($('ingestTitle').value.trim()) body.title = $('ingestTitle').value.trim();
+        if ($('ingestPath').value.trim()) body.path = $('ingestPath').value.trim();
+        if ($('ingestTier').value) body.tier = $('ingestTier').value;
+        if (tags.length > 0) body.tags = tags;
+
+        const out = await api('/v1/ingest', { method: 'POST', body });
+        $('ingestResultBox').textContent = JSON.stringify(out, null, 2);
+        toast(`Ingested ${out.path} into ${out.branch}`, 'ok');
+        await refreshBranchData();
+      }
+
+      async function runConsolidate() {
+        const body = {
+          branch: state.branch,
+          max_notes: Number($('consMaxNotes').value || 50),
+          min_importance: parseFloat($('consMinImp').value || '0') || 0,
+          strategy: $('consStrategy').value,
+          dry_run: $('consDryRun').checked,
+          auto_merge: $('consAutoMerge').checked,
+          archive_processed: $('consArchive').checked,
+          delete_branch: $('consDeleteBranch').checked,
+          use_llm: $('consUseLlm').checked
+        };
+        if ($('consBranch').value.trim()) body.consolidation_branch = $('consBranch').value.trim();
+        if ($('consPrefix').value.trim()) body.prefix = $('consPrefix').value.trim();
+
+        const report = await api('/v1/consolidate', { method: 'POST', body });
+        $('consResultBox').textContent = JSON.stringify(report, null, 2);
+        toast(`Consolidation complete (${report.episodes_scanned} episodes scanned)`, 'ok');
+        await refreshBranchData();
+      }
+
+      // ---------- Tab 5: /core Compiler, GC & Live SSE ----------
+      async function runCompile() {
+        const max_tokens = Number($('compileBudgetInput').value || 2000);
+        const res = await api('/v1/compile', {
+          method: 'POST',
+          body: { branch: state.branch, max_tokens }
+        });
+        $('compileMetaText').textContent = `Tokens: ${res.estimated_tokens} | Included: ${(res.included_paths || []).length} | Skipped: ${(res.skipped_paths || []).length}`;
+        $('compileOutputBox').textContent = res.rendered || '(No /core memories active on this branch)';
+      }
+
+      async function runGc() {
+        const stats = await api('/v1/gc', { method: 'POST' });
+        $('gcOutputBox').textContent = JSON.stringify(stats, null, 2);
+        toast('Garbage collection finished', 'ok');
+        await refreshStatus();
+      }
+
+      function reconnectSse() {
+        if (state.sseSource) {
+          state.sseSource.close();
+          state.sseSource = null;
+        }
+        if (state.ssePaused) {
+          $('sseDot').className = 'dot warn';
+          $('sseText').textContent = 'SSE Paused';
+          return;
+        }
+        const params = new URLSearchParams();
+        if ($('sseBranchOnly').checked) params.set('branch', state.branch);
+        if (state.token) params.set('token', state.token);
+        const url = `/v1/events${params.toString() ? `?${params.toString()}` : ''}`;
+
+        const es = new EventSource(url);
+        state.sseSource = es;
+        $('sseDot').className = 'dot warn';
+        $('sseText').textContent = 'SSE Connecting';
+
+        es.onopen = () => {
+          $('sseDot').className = 'dot ok';
+          $('sseText').textContent = $('sseBranchOnly').checked ? `SSE (${state.branch})` : 'SSE (all)';
+        };
+        es.onerror = () => {
+          $('sseDot').className = 'dot err';
+          $('sseText').textContent = 'SSE Offline';
+        };
+
+        const handlePayload = (ev) => {
+          try {
+            const parsed = JSON.parse(ev.data);
+            appendSseEntry(parsed);
+            if (parsed.branch === state.branch || parsed.event === 'branch_created' || parsed.event === 'branch_deleted') {
+              refreshStatus().catch(() => {});
+              loadBranches().catch(() => {});
+            }
+          } catch {
+            appendSseEntry({ event: ev.type || 'message', branch: '-', timestamp_ms: Date.now(), data: ev.data });
+          }
+        };
+
+        SSE_EVENTS.forEach((name) => es.addEventListener(name, handlePayload));
+        es.onmessage = handlePayload;
+      }
+
+      function appendSseEntry(item) {
+        const host = $('sseLogList');
+        if (host.firstElementChild?.classList.contains('muted')) {
+          host.innerHTML = '';
+        }
+        const el = document.createElement('div');
+        el.className = 'sse-item';
+        el.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <div>
+              <span class="tier-badge tier-procedural">${escapeHtml(item.event)}</span>
+              <span class="mono small" style="margin-left:6px;">${escapeHtml(item.branch)}</span>
+            </div>
+            <span class="small muted">${escapeHtml(fmtTime(item.timestamp_ms))}</span>
+          </div>
+          <pre class="out-box" style="max-height:110px;">${escapeHtml(JSON.stringify(item.data, null, 2))}</pre>
+        `;
+        host.prepend(el);
+        while (host.children.length > 80) host.lastElementChild.remove();
+      }
+
+      // ---------- Switch Branch & Refresh ----------
+      async function refreshBranchData() {
+        await Promise.all([
+          refreshHealth(),
+          loadBranches(),
+          refreshStatus(),
+          loadNodes(),
+          loadGraph(),
+          loadCommits()
+        ]);
+        $('diffTargetInput').value = state.branch;
+      }
+
+      async function jumpToEditorPath(path) {
+        document.querySelector('[data-tab="files"]').click();
+        await openNote(path);
+      }
+
+      // ---------- Event Listeners & Delegation ----------
+      document.querySelectorAll('.tab-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const tab = btn.dataset.tab;
+          document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
+          document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${tab}`));
+          if (tab === 'search') renderGraph();
+        });
+      });
+
+      document.querySelectorAll('[data-close-modal]').forEach((btn) => {
+        btn.addEventListener('click', () => closeModal(btn.dataset.closeModal));
+      });
+
+      $('btnTheme').addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
+
+      $('btnRefreshAll').addEventListener('click', async () => {
+        try {
+          await refreshBranchData();
+          toast('Workspace synced', 'ok');
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+
+      $('branchSelect').addEventListener('change', async (e) => {
+        state.branch = e.target.value;
+        state.activePath = null;
+        state.selectedGraphNode = null;
+        state.graphPos = {};
+        $('editPath').value = '';
+        $('editContent').value = '';
+        $('previewOutput').innerHTML = '';
+        try {
+          await refreshBranchData();
+          reconnectSse();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+
+      $('btnNewBranch').addEventListener('click', () => {
+        $('newBranchName').value = '';
+        $('newBranchFrom').value = state.branch;
+        openModal('branchModal');
+        $('newBranchName').focus();
+      });
+
+      $('btnSubmitBranch').addEventListener('click', async () => {
+        const name = $('newBranchName').value.trim();
+        const from = $('newBranchFrom').value.trim() || state.branch;
+        if (!name) return toast('Branch name is required', 'err');
+        try {
+          await api('/v1/branches', { method: 'POST', body: { name, from } });
+          closeModal('branchModal');
+          state.branch = name;
+          state.graphPos = {};
+          await refreshBranchData();
+          reconnectSse();
+          toast(`Created branch ${name}`, 'ok');
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+
+      $('btnDelBranch').addEventListener('click', async () => {
+        if (state.branch === 'main') return;
+        if (!confirm(`Delete branch "${state.branch}"? Unreachable commits will remain reclaimable via GC.`)) return;
+        try {
+          const target = state.branch;
+          await api(`/v1/branches?name=${encodeURIComponent(target)}`, { method: 'DELETE' });
+          state.branch = 'main';
+          state.graphPos = {};
+          await refreshBranchData();
+          reconnectSse();
+          toast(`Deleted branch ${target}`, 'ok');
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+
+      $('btnAuthModal').addEventListener('click', () => {
+        $('authTokenInput').value = state.token;
+        openModal('authModal');
+      });
+
+      $('btnSaveAuth').addEventListener('click', async () => {
+        state.token = $('authTokenInput').value.trim();
+        if (state.token) localStorage.setItem(TOKEN_KEY, state.token);
+        else localStorage.removeItem(TOKEN_KEY);
+        state.authPrompted = false;
+        closeModal('authModal');
+        try {
+          await refreshBranchData();
+          reconnectSse();
+          toast('Authentication updated', 'ok');
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+
+      $('btnClearAuth').addEventListener('click', () => {
+        $('authTokenInput').value = '';
+        state.token = '';
+        localStorage.removeItem(TOKEN_KEY);
+      });
+
+      // Files & Editor controls
+      $('fileFilterInput').addEventListener('input', (e) => {
+        state.textFilter = e.target.value;
+        renderFileList();
+      });
+      $('tierFilterGroup').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-tier]');
+        if (!btn) return;
+        state.tierFilter = btn.dataset.tier;
+        document.querySelectorAll('#tierFilterGroup .chip-btn').forEach((b) => b.classList.toggle('active', b === btn));
+        renderFileList();
+      });
+      $('fileList').addEventListener('click', async (e) => {
+        const item = e.target.closest('[data-open-path]');
+        if (!item) return;
+        try {
+          await openNote(item.dataset.openPath);
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+      $('btnNewNote').addEventListener('click', () => startNewNote());
+      $('editContent').addEventListener('input', (e) => {
+        $('previewOutput').innerHTML = renderMarkdownSafe(e.target.value);
+      });
+      $('editContent').addEventListener('keydown', async (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+          e.preventDefault();
+          try { await stageCurrentNote(); } catch (err) { toast(err.message, 'err'); }
+        }
+      });
+      $('btnStageNote').addEventListener('click', async () => {
+        try { await stageCurrentNote(); } catch (err) { toast(err.message, 'err'); }
+      });
+      $('btnDeleteNote').addEventListener('click', async () => {
+        try { await deleteCurrentNote(); } catch (err) { toast(err.message, 'err'); }
+      });
+
+      const openCommitModal = () => {
+        $('commitBranchReadonly').value = state.branch;
+        $('commitMsgInput').value = '';
+        openModal('commitModal');
+        $('commitMsgInput').focus();
+      };
+      $('btnOpenCommitModal').addEventListener('click', openCommitModal);
+      $('statStagedBtn').addEventListener('click', openCommitModal);
+      $('btnSubmitCommit').addEventListener('click', async () => {
+        const message = $('commitMsgInput').value.trim();
+        const author = $('commitAuthorInput').value.trim() || 'web-console';
+        if (!message) return toast('Commit message cannot be empty', 'err');
+        try {
+          const res = await api('/v1/commits', {
+            method: 'POST',
+            body: { branch: state.branch, message, author }
+          });
+          closeModal('commitModal');
+          toast(`Committed ${res.commit_id.slice(0, 8)} on ${res.branch}`, 'ok');
+          await Promise.all([refreshStatus(), loadBranches(), loadCommits()]);
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+
+      // Delegated clicks for [[Wikilinks]] and Jump to Editor
+      document.body.addEventListener('click', async (e) => {
+        const jumpBtn = e.target.closest('[data-jump-path]');
+        if (jumpBtn) {
+          try { await jumpToEditorPath(jumpBtn.dataset.jumpPath); } catch (err) { toast(err.message, 'err'); }
+          return;
+        }
+        const wikiBtn = e.target.closest('[data-wikilink]');
+        if (wikiBtn) {
+          const raw = wikiBtn.dataset.wikilink;
+          const resolved = resolveWikiInBranch(raw);
+          if (resolved) {
+            try { await openNote(resolved); } catch (err) { toast(err.message, 'err'); }
+          } else {
+            const clean = raw.replace(/^\/+/, '');
+            const candidate = clean.includes('/') ? `/${clean}` : `/semantic/${clean}`;
+            const finalPath = candidate.endsWith('.md') ? candidate : `${candidate}.md`;
+            if (confirm(`Note "${raw}" not found on branch "${state.branch}". Create draft at ${finalPath}?`)) {
+              startNewNote(finalPath);
+            }
+          }
+        }
+      });
+
+      // Search & Graph events
+      $('btnRunSearch').addEventListener('click', () => runSearch().catch((e) => toast(e.message, 'err')));
+      $('searchQueryInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runSearch().catch((err) => toast(err.message, 'err'));
+      });
+      $('btnReloadGraph').addEventListener('click', () => loadGraph(false).catch((e) => toast(e.message, 'err')));
+      $('btnResetLayout').addEventListener('click', () => loadGraph(true).catch((e) => toast(e.message, 'err')));
+      $('graphTierFilter').addEventListener('change', renderGraph);
+
+      // SVG Node Click & Drag
+      let draggingNode = null;
+      let dragMoved = false;
+      function clientToSvg(evt) {
+        const svg = $('graphSvg');
+        const pt = svg.createSVGPoint();
+        pt.x = evt.clientX;
+        pt.y = evt.clientY;
+        const ctm = svg.getScreenCTM();
+        return ctm ? pt.matrixTransform(ctm.inverse()) : { x: 400, y: 260 };
+      }
+
+      $('graphNodesLayer').addEventListener('pointerdown', (e) => {
+        const g = e.target.closest('.graph-node');
+        if (!g) return;
+        draggingNode = g.dataset.nodeId;
+        dragMoved = false;
+        g.setPointerCapture?.(e.pointerId);
+      });
+      window.addEventListener('pointermove', (e) => {
+        if (!draggingNode) return;
+        dragMoved = true;
+        const pt = clientToSvg(e);
+        state.graphPos[draggingNode] = {
+          x: Math.max(30, Math.min(790, pt.x)),
+          y: Math.max(25, Math.min(495, pt.y))
+        };
+        renderGraph();
+      });
+      window.addEventListener('pointerup', () => {
+        if (draggingNode && !dragMoved) {
+          state.selectedGraphNode = state.selectedGraphNode === draggingNode ? null : draggingNode;
+          renderGraph();
+        }
+        draggingNode = null;
+      });
+      $('graphNodesLayer').addEventListener('dblclick', (e) => {
+        const g = e.target.closest('.graph-node');
+        if (!g) return;
+        jumpToEditorPath(g.dataset.nodeId).catch((err) => toast(err.message, 'err'));
+      });
+
+      // VCS tab events
+      $('btnReloadCommits').addEventListener('click', () => loadCommits().catch((e) => toast(e.message, 'err')));
+      $('commitList').addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-rewind-cid]');
+        if (!btn) return;
+        const cid = btn.dataset.rewindCid;
+        if (!confirm(`Rewind branch "${state.branch}" workspace & HEAD to commit ${cid.slice(0, 10)}?`)) return;
+        try {
+          await api('/v1/rewind', { method: 'POST', body: { branch: state.branch, commit_id: cid } });
+          toast(`Rewound ${state.branch} to ${cid.slice(0, 8)}`, 'ok');
+          state.activePath = null;
+          state.graphPos = {};
+          await refreshBranchData();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+      $('btnRunDiff').addEventListener('click', () => runDiff().catch((e) => toast(e.message, 'err')));
+      $('btnRunMerge').addEventListener('click', () => runMerge().catch((e) => toast(e.message, 'err')));
+
+      // Ingest & Consolidate
+      $('btnRunIngest').addEventListener('click', () => runIngest().catch((e) => toast(e.message, 'err')));
+      $('btnRunConsolidate').addEventListener('click', () => runConsolidate().catch((e) => toast(e.message, 'err')));
+
+      // Ops & SSE
+      $('btnRunCompile').addEventListener('click', () => runCompile().catch((e) => toast(e.message, 'err')));
+      $('btnCopyCompiled').addEventListener('click', async () => {
+        const txt = $('compileOutputBox').textContent || '';
+        if (!txt) return;
+        try {
+          await navigator.clipboard.writeText(txt);
+          toast('Copied compiled /core prompt', 'ok');
+        } catch {
+          toast('Clipboard permission denied', 'err');
+        }
+      });
+      $('btnRunGc').addEventListener('click', () => runGc().catch((e) => toast(e.message, 'err')));
+      $('sseBranchOnly').addEventListener('change', reconnectSse);
+      $('btnToggleSse').addEventListener('click', () => {
+        state.ssePaused = !state.ssePaused;
+        $('btnToggleSse').textContent = state.ssePaused ? 'Resume' : 'Pause';
+        reconnectSse();
+      });
+      $('btnClearSse').addEventListener('click', () => {
+        $('sseLogList').innerHTML = '<div class="muted small">Cleared. Listening for daemon events…</div>';
+      });
+
+      // Boot
+      (async () => {
+        applyTheme(state.theme);
+        try {
+          await refreshBranchData();
+          if (state.nodes.length > 0) {
+            await openNote(state.nodes[0].path);
+          } else {
+            startNewNote('/core/rules.md');
+          }
+          await runCompile();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+        reconnectSse();
+      })();
+    })();
+  </script>
+</body>
+</html>
