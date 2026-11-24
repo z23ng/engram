@@ -815,3 +815,92 @@ fn collaborative_pm_dev_bot_ingest_draft_merge_and_vault_roundtrip() {
         .join(bot_out.path.as_str().trim_start_matches('/'))
         .exists());
 }
+
+#[test]
+fn branch_graph_resolves_wikilinks_and_markdown_links_without_cross_branch_leakage() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let vcs = MemVcs::new(store);
+    vcs.init().unwrap();
+    let engine = MemSearchEngine::new_bm25_only(vcs.clone());
+
+    vcs.write(
+        "main",
+        make_node(
+            "/semantic/docs/index.md",
+            "# Docs Index\n\nSee [Order](./order/research.md) and [SOP](../procedural/deploy.md#step-1).\n",
+            0.9,
+            vec!["docs"],
+        ),
+    )
+    .unwrap();
+    vcs.write(
+        "main",
+        make_node(
+            "/semantic/docs/order/research.md",
+            "# Order Research\n\nAlso checks [[Deploy Guide]] and [Root](/core/rules.md).\n",
+            0.85,
+            vec!["order"],
+        ),
+    )
+    .unwrap();
+    vcs.write(
+        "main",
+        make_node(
+            "/procedural/deploy.md",
+            "# Deploy Guide\n\nDeployment runbook.\n",
+            0.8,
+            vec!["ops"],
+        ),
+    )
+    .unwrap();
+    vcs.write(
+        "main",
+        make_node(
+            "/core/rules.md",
+            "# Core Rules\n\nNever bypass WAL.\n",
+            1.0,
+            vec!["core"],
+        ),
+    )
+    .unwrap();
+    vcs.commit("main", "tester", "seed mixed links").unwrap();
+
+    vcs.create_branch("exp/draft", &Revision::BranchHead("main".into()))
+        .unwrap();
+    vcs.write(
+        "exp/draft",
+        make_node(
+            "/semantic/secret.md",
+            "# Secret\n\nLinks [Order](./docs/order/research.md).\n",
+            0.7,
+            vec![],
+        ),
+    )
+    .unwrap();
+
+    let main_graph = engine
+        .branch_graph(&Revision::BranchWorkspace("main".into()))
+        .unwrap();
+    assert_eq!(main_graph.nodes.len(), 4);
+    assert!(main_graph
+        .nodes
+        .iter()
+        .all(|n| n.path != "/semantic/secret.md"));
+    assert!(main_graph.edges.iter().any(|e| {
+        e.source == "/semantic/docs/index.md" && e.target == "/semantic/docs/order/research.md"
+    }));
+    assert!(main_graph.edges.iter().any(|e| {
+        e.source == "/semantic/docs/order/research.md" && e.target == "/procedural/deploy.md"
+    }));
+    assert!(main_graph.edges.iter().any(|e| {
+        e.source == "/semantic/docs/order/research.md" && e.target == "/core/rules.md"
+    }));
+
+    let draft_graph = engine
+        .branch_graph(&Revision::BranchWorkspace("exp/draft".into()))
+        .unwrap();
+    assert_eq!(draft_graph.nodes.len(), 5);
+    assert!(draft_graph.edges.iter().any(|e| {
+        e.source == "/semantic/secret.md" && e.target == "/semantic/docs/order/research.md"
+    }));
+}

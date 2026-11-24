@@ -1577,73 +1577,70 @@
       function computeGraphLayout() {
         const nodes = state.graph.nodes || [];
         const edges = state.graph.edges || [];
-        const W = 820, H = 520, cx = W / 2, cy = H / 2;
         if (nodes.length === 0) return;
 
-        // Initialize missing positions deterministically around a circle
-        const unpositioned = nodes.filter((n) => !state.graphPos[n.id]);
-        if (unpositioned.length === nodes.length) {
-          const R = Math.min(W, H) * 0.34;
-          nodes.forEach((n, idx) => {
-            const ang = (2 * Math.PI * idx) / Math.max(1, nodes.length) - Math.PI / 2;
-            state.graphPos[n.id] = {
-              x: cx + R * Math.cos(ang),
-              y: cy + R * Math.sin(ang)
-            };
-          });
-        } else {
-          nodes.forEach((n, idx) => {
-            if (!state.graphPos[n.id]) {
-              const ang = (2 * Math.PI * idx) / Math.max(1, nodes.length);
-              state.graphPos[n.id] = { x: cx + 110 * Math.cos(ang), y: cy + 110 * Math.sin(ang) };
+        const missing = nodes.filter((n) => !state.graphPos[n.id]);
+        if (missing.length > 0) {
+          const tiers = ['core', 'semantic', 'procedural', 'episodic'];
+          const byTier = { core: [], semantic: [], procedural: [], episodic: [] };
+          for (const n of nodes) (byTier[n.tier] || byTier.semantic).push(n);
+          for (const t of tiers) {
+            byTier[t].sort((a, b) => a.path.localeCompare(b.path));
+          }
+          const golden = Math.PI * (3 - Math.sqrt(5));
+          byTier.core.forEach((n, i) => {
+            if (state.graphPos[n.id]) return;
+            if (byTier.core.length === 1) state.graphPos[n.id] = { x: 0, y: 0 };
+            else {
+              const r = 42 * Math.sqrt(i + 0.5);
+              state.graphPos[n.id] = { x: r * Math.cos(i * golden), y: r * Math.sin(i * golden) };
             }
           });
-        }
+          const outer = ['semantic', 'procedural', 'episodic'].filter((t) => byTier[t].length > 0);
+          const totalOuter = outer.reduce((s, t) => s + byTier[t].length, 0);
+          const ringR = Math.max(byTier.core.length ? 150 : 90, Math.sqrt(Math.max(1, totalOuter)) * 46);
+          outer.forEach((t, sIdx) => {
+            const grp = byTier[t];
+            const ang = (2 * Math.PI * sIdx) / outer.length - Math.PI / 2;
+            const spreadR = Math.max(70, Math.sqrt(grp.length) * 34);
+            const dist = outer.length === 1 && !byTier.core.length ? 0 : ringR + spreadR * 0.45;
+            const cx = dist * Math.cos(ang), cy = dist * Math.sin(ang);
+            grp.forEach((n, i) => {
+              if (state.graphPos[n.id]) return;
+              if (grp.length === 1) state.graphPos[n.id] = { x: cx, y: cy };
+              else {
+                const rr = 34 * Math.sqrt(i + 0.6);
+                const th = i * golden + ang;
+                state.graphPos[n.id] = { x: cx + rr * Math.cos(th), y: cy + rr * Math.sin(th) };
+              }
+            });
+          });
 
-        if (nodes.length > 1 && unpositioned.length > 0) {
-          const disp = {};
-          const k = Math.sqrt((W * H) / Math.max(4, nodes.length)) * 0.65;
-          for (let iter = 0; iter < 140; iter++) {
-            for (const n of nodes) disp[n.id] = { dx: 0, dy: 0 };
+          const minSep = 54;
+          for (let iter = 0; iter < 85; iter++) {
             for (let i = 0; i < nodes.length; i++) {
               for (let j = i + 1; j < nodes.length; j++) {
-                const a = state.graphPos[nodes[i].id];
-                const b = state.graphPos[nodes[j].id];
-                let dx = a.x - b.x;
-                let dy = a.y - b.y;
-                let d2 = dx * dx + dy * dy;
-                if (d2 < 1) { dx = 1; dy = 1; d2 = 2; }
-                const d = Math.sqrt(d2);
-                const f = (k * k) / d * 0.45;
-                const fx = (dx / d) * f, fy = (dy / d) * f;
-                disp[nodes[i].id].dx += fx;
-                disp[nodes[i].id].dy += fy;
-                disp[nodes[j].id].dx -= fx;
-                disp[nodes[j].id].dy -= fy;
+                const a = state.graphPos[nodes[i].id], b = state.graphPos[nodes[j].id];
+                let dx = b.x - a.x, dy = b.y - a.y;
+                let d = Math.sqrt(dx * dx + dy * dy);
+                if (d < 0.01) { dx = 1; dy = 0.5; d = 1.12; }
+                if (d < minSep) {
+                  const push = ((minSep - d) / d) * 0.48;
+                  a.x -= dx * push; a.y -= dy * push;
+                  b.x += dx * push; b.y += dy * push;
+                }
               }
             }
             for (const e of edges) {
-              const a = state.graphPos[e.source];
-              const b = state.graphPos[e.target];
+              const a = state.graphPos[e.source], b = state.graphPos[e.target];
               if (!a || !b) continue;
-              const dx = b.x - a.x;
-              const dy = b.y - a.y;
+              const dx = b.x - a.x, dy = b.y - a.y;
               const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-              const f = (d * d) / k * 0.14;
-              const fx = (dx / d) * f, fy = (dy / d) * f;
-              disp[e.source].dx += fx; disp[e.source].dy += fy;
-              disp[e.target].dx -= fx; disp[e.target].dy -= fy;
-            }
-            const stepCap = Math.max(2, 18 * (1 - iter / 145));
-            for (const n of nodes) {
-              const p = state.graphPos[n.id];
-              const v = disp[n.id];
-              v.dx += (cx - p.x) * 0.04;
-              v.dy += (cy - p.y) * 0.04;
-              const mag = Math.max(0.001, Math.sqrt(v.dx * v.dx + v.dy * v.dy));
-              const step = Math.min(mag, stepCap);
-              p.x = Math.max(46, Math.min(W - 46, p.x + (v.dx / mag) * step));
-              p.y = Math.max(36, Math.min(H - 36, p.y + (v.dy / mag) * step));
+              if (d > 135) {
+                const pull = ((d - 135) / d) * 0.08;
+                a.x += dx * pull; a.y += dy * pull;
+                b.x -= dx * pull; b.y -= dy * pull;
+              }
             }
           }
         }
@@ -1656,7 +1653,26 @@
         const visibleSet = new Set(visibleNodes.map((n) => n.id));
         const visibleEdges = (state.graph.edges || []).filter((e) => visibleSet.has(e.source) && visibleSet.has(e.target));
 
-        $('graphStatsText').textContent = `${visibleNodes.length} nodes · ${visibleEdges.length} wikilink edges`;
+        $('graphStatsText').textContent = `${visibleNodes.length} nodes · ${visibleEdges.length} note links`;
+
+        // Auto-fit dynamic SVG viewBox around visible nodes without clamping node positions.
+        if (visibleNodes.length > 0) {
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+          for (const n of visibleNodes) {
+            const p = state.graphPos[n.id];
+            if (!p) continue;
+            minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+            minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+          }
+          if (Number.isFinite(minX)) {
+            const pad = 75;
+            const w = Math.max(260, (maxX - minX) + pad * 2);
+            const h = Math.max(220, (maxY - minY) + pad * 2);
+            $('graphSvg').setAttribute('viewBox', `${(minX - pad).toFixed(1)} ${(minY - pad).toFixed(1)} ${w.toFixed(1)} ${h.toFixed(1)}`);
+          }
+        } else {
+          $('graphSvg').setAttribute('viewBox', '0 0 820 520');
+        }
 
         const sel = state.selectedGraphNode;
         const connectedToSel = new Set();
@@ -1667,6 +1683,13 @@
             if (e.target === sel) connectedToSel.add(e.source);
           });
         }
+        const hubSet = new Set(
+          [...visibleNodes]
+            .filter((n) => ((n.in_degree || 0) + (n.out_degree || 0)) > 0 || n.tier === 'core')
+            .sort((a, b) => ((b.in_degree || 0) + (b.out_degree || 0)) - ((a.in_degree || 0) + (a.out_degree || 0)))
+            .slice(0, 12)
+            .map((n) => n.id)
+        );
 
         $('graphEdgesLayer').innerHTML = visibleEdges.map((e) => {
           const p1 = state.graphPos[e.source];
@@ -1674,7 +1697,7 @@
           if (!p1 || !p2) return '';
           const isHot = sel && (e.source === sel || e.target === sel);
           const stroke = isHot ? 'var(--accent)' : 'var(--border-strong)';
-          const opacity = sel ? (isHot ? 0.95 : 0.2) : 0.72;
+          const opacity = sel ? (isHot ? 0.95 : 0.18) : 0.72;
           const marker = isHot ? 'url(#arrowheadActive)' : 'url(#arrowhead)';
           return `<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${stroke}" stroke-width="${isHot ? 2.1 : 1.3}" stroke-opacity="${opacity}" marker-end="${marker}" data-edge-src="${escapeHtml(e.source)}" data-edge-dst="${escapeHtml(e.target)}"/>`;
         }).join('');
@@ -1683,14 +1706,15 @@
           const p = state.graphPos[n.id];
           if (!p) return '';
           const deg = (n.in_degree || 0) + (n.out_degree || 0);
-          const r = 8 + Math.min(9, deg * 1.6);
+          const r = 7 + Math.min(8, deg * 1.4);
           const isSel = sel === n.id;
           const dimmed = sel && !connectedToSel.has(n.id);
-          const shortTitle = (n.title || n.path).slice(0, 22);
+          const showLabel = visibleNodes.length <= 24 || connectedToSel.has(n.id) || hubSet.has(n.id);
+          const shortTitle = (n.title || n.path).slice(0, 20);
           return `
-            <g class="graph-node" data-node-id="${escapeHtml(n.id)}" transform="translate(${p.x.toFixed(1)}, ${p.y.toFixed(1)})" style="opacity:${dimmed ? 0.28 : 1};">
+            <g class="graph-node" data-node-id="${escapeHtml(n.id)}" transform="translate(${p.x.toFixed(1)}, ${p.y.toFixed(1)})" style="opacity:${dimmed ? 0.25 : 1};">
               <circle r="${r}" fill="${tierColor(n.tier)}" fill-opacity="0.24" stroke="${isSel ? 'var(--text)' : tierColor(n.tier)}" stroke-width="${isSel ? 2.6 : 1.8}"/>
-              <text x="0" y="${r + 13}" text-anchor="middle">${escapeHtml(shortTitle)}</text>
+              ${showLabel ? `<text x="0" y="${r + 13}" text-anchor="middle" style="paint-order:stroke;stroke:var(--bg);stroke-width:3px;stroke-linejoin:round;">${escapeHtml(shortTitle)}</text>` : ''}
             </g>
           `;
         }).join('');
@@ -2168,10 +2192,7 @@
         if (!draggingNode) return;
         dragMoved = true;
         const pt = clientToSvg(e);
-        state.graphPos[draggingNode] = {
-          x: Math.max(30, Math.min(790, pt.x)),
-          y: Math.max(25, Math.min(495, pt.y))
-        };
+        state.graphPos[draggingNode] = { x: pt.x, y: pt.y };
         renderGraph();
       });
       window.addEventListener('pointerup', () => {

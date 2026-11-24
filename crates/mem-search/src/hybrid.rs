@@ -20,7 +20,7 @@ use crate::embedder::{
 };
 use crate::ingest::{ingest_knowledge, IngestOutcome, IngestRequest};
 use crate::vault::{export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats};
-use crate::wiki::{parse_wiki_document, ParsedWikiDocument};
+use crate::wiki::{extract_markdown_links_from_markdown, parse_wiki_document, ParsedWikiDocument};
 
 /// Embedding texts per request, and the chunk budget of one write transaction.
 const EMBED_GROUP_CHUNKS: usize = 128;
@@ -1049,7 +1049,7 @@ impl MemSearchEngine {
                     }
                 }
 
-                let mut links: Vec<(BlobId, String)> = Vec::new();
+                let mut links: Vec<(BlobId, &'static str, String)> = Vec::new();
                 {
                     let mut stmt = conn
                         .prepare_cached(
@@ -1070,7 +1070,40 @@ impl MemSearchEngine {
                         let (hex, target_ref) = row.map_err(|e| {
                             MemError::Storage(format!("failed to decode graph link row: {e}"))
                         })?;
-                        links.push((BlobId::from_hex(&hex)?, target_ref));
+                        links.push((BlobId::from_hex(&hex)?, "wikilink", target_ref));
+                    }
+                }
+
+                // Also inspect active chunk snippets for standard `[label](target.md)` links so
+                // vaults indexed before markdown-link extraction surface full graph edges immediately.
+                {
+                    let mut stmt = conn
+                        .prepare_cached(
+                            "SELECT c.blob_id, c.raw_snippet
+                             FROM chunk_index AS c
+                             INNER JOIN _mem_graph_active_blobs AS a ON a.blob_id = c.blob_id
+                             ORDER BY c.blob_id, c.chunk_seq",
+                        )
+                        .map_err(|e| {
+                            MemError::Storage(format!(
+                                "failed to prepare graph markdown-link query: {e}"
+                            ))
+                        })?;
+                    let rows = stmt
+                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                        .map_err(|e| {
+                            MemError::Storage(format!(
+                                "failed to query chunk snippets for graph links: {e}"
+                            ))
+                        })?;
+                    for row in rows {
+                        let (hex, snippet) = row.map_err(|e| {
+                            MemError::Storage(format!("failed to decode snippet row: {e}"))
+                        })?;
+                        let blob_id = BlobId::from_hex(&hex)?;
+                        for mdlink in extract_markdown_links_from_markdown(&snippet) {
+                            links.push((blob_id, "mdlink", mdlink.target));
+                        }
                     }
                 }
 
@@ -1082,7 +1115,13 @@ impl MemSearchEngine {
         })?;
 
         let mut wiki_resolver: HashMap<String, Vec<VirtualPath>> = HashMap::new();
+        let mut active_paths: Vec<VirtualPath> = Vec::with_capacity(active.len());
+        let mut active_paths_by_lower: HashMap<String, VirtualPath> =
+            HashMap::with_capacity(active.len());
+
         for (path, blob_id, _) in &active {
+            active_paths.push(path.clone());
+            active_paths_by_lower.insert(path.as_str().to_lowercase(), path.clone());
             let (title, aliases) = headers_by_blob
                 .get(blob_id)
                 .map(|(t, a)| (t.as_str(), a.as_slice()))
@@ -1096,18 +1135,24 @@ impl MemSearchEngine {
             register_resolver_keys(&mut wiki_resolver, path, title, aliases);
         }
 
-        let mut unique_edges: BTreeMap<(String, String), String> = BTreeMap::new();
+        let mut unique_edges: BTreeMap<(String, String), (&'static str, String)> = BTreeMap::new();
         let mut out_degrees: HashMap<String, usize> = HashMap::new();
         let mut in_degrees: HashMap<String, usize> = HashMap::new();
 
-        for (source_blob, target_ref) in raw_links {
+        for (source_blob, link_kind, target_ref) in raw_links {
             let Some(source_paths) = paths_by_blob.get(&source_blob) else {
                 continue;
             };
-            let Some(target_paths) = resolve_wiki_target(&wiki_resolver, &target_ref) else {
-                continue;
-            };
             for src in source_paths {
+                let Some(target_paths) = resolve_branch_graph_target(
+                    src,
+                    &target_ref,
+                    &wiki_resolver,
+                    &active_paths_by_lower,
+                    &active_paths,
+                ) else {
+                    continue;
+                };
                 for tgt in &target_paths {
                     if src != tgt {
                         let src_path = src.as_str().to_string();
@@ -1117,7 +1162,7 @@ impl MemSearchEngine {
                         {
                             *out_degrees.entry(src_path).or_insert(0) += 1;
                             *in_degrees.entry(tgt_path).or_insert(0) += 1;
-                            entry.insert(target_ref.clone());
+                            entry.insert((link_kind, target_ref.clone()));
                         }
                     }
                 }
@@ -1153,10 +1198,10 @@ impl MemSearchEngine {
 
         let edges = unique_edges
             .into_iter()
-            .map(|((source, target), label)| GraphEdge {
+            .map(|((source, target), (kind, label))| GraphEdge {
                 source,
                 target,
-                kind: "wikilink".to_string(),
+                kind: kind.to_string(),
                 label,
             })
             .collect();
@@ -1166,6 +1211,107 @@ impl MemSearchEngine {
             nodes,
             edges,
         })
+    }
+}
+
+fn resolve_branch_graph_target(
+    src: &VirtualPath,
+    target_ref: &str,
+    wiki_resolver: &HashMap<String, Vec<VirtualPath>>,
+    active_paths_by_lower: &HashMap<String, VirtualPath>,
+    active_paths: &[VirtualPath],
+) -> Option<Vec<VirtualPath>> {
+    let trimmed = target_ref.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rel_resolved) = normalize_relative_virtual_path(src, trimmed) {
+        if let Some(found) = active_paths_by_lower.get(&rel_resolved) {
+            return Some(vec![found.clone()]);
+        }
+        if !rel_resolved.ends_with(".md") {
+            let with_ext = format!("{rel_resolved}.md");
+            if let Some(found) = active_paths_by_lower.get(&with_ext) {
+                return Some(vec![found.clone()]);
+            }
+        }
+    }
+
+    let cleaned = trimmed
+        .trim_start_matches("./")
+        .trim_start_matches("../")
+        .trim_start_matches('/')
+        .to_lowercase();
+    if cleaned.contains('/') {
+        let suffix = format!("/{cleaned}");
+        let suffix_md = if cleaned.ends_with(".md") {
+            None
+        } else {
+            Some(format!("/{cleaned}.md"))
+        };
+        let suffix_matches: Vec<VirtualPath> = active_paths
+            .iter()
+            .filter(|p| {
+                let low = p.as_str().to_lowercase();
+                low.ends_with(&suffix) || suffix_md.as_deref().is_some_and(|sm| low.ends_with(sm))
+            })
+            .cloned()
+            .collect();
+        if suffix_matches.len() == 1 {
+            return Some(suffix_matches);
+        }
+        if suffix_matches.len() > 1 {
+            let src_tier = src.tier().as_str();
+            let same_tier: Vec<VirtualPath> = suffix_matches
+                .iter()
+                .filter(|p| p.tier().as_str() == src_tier)
+                .cloned()
+                .collect();
+            if same_tier.len() == 1 {
+                return Some(same_tier);
+            }
+            return Some(suffix_matches);
+        }
+    }
+
+    resolve_wiki_target(wiki_resolver, trimmed)
+}
+
+fn normalize_relative_virtual_path(src: &VirtualPath, target_ref: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if target_ref.starts_with('/') {
+        for seg in target_ref.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                s => parts.push(s.to_lowercase()),
+            }
+        }
+    } else {
+        if let Some(parent) = src.as_str().rsplit_once('/').map(|(dir, _)| dir) {
+            for seg in parent.split('/') {
+                if !seg.is_empty() {
+                    parts.push(seg.to_lowercase());
+                }
+            }
+        }
+        for seg in target_ref.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                s => parts.push(s.to_lowercase()),
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("/{}", parts.join("/")))
     }
 }
 

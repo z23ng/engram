@@ -124,6 +124,11 @@ pub fn parse_wiki_document(
                 wikilinks.push(link);
             }
         }
+        for link in extract_markdown_links_from_line(&stripped) {
+            if seen_links.insert((link.target.clone(), link.alias.clone())) {
+                wikilinks.push(link);
+            }
+        }
         for tag in extract_inline_tags_from_line(&stripped) {
             inline_tags.push(tag);
         }
@@ -431,6 +436,124 @@ fn extract_wikilinks_from_line(line: &str) -> Vec<WikiLink> {
     links
 }
 
+/// Extracts standard Markdown links `[label](target.md)` or `[label](/tier/path)` from a single line
+/// whose inline code spans have already been stripped. Skips images (`![...]`) and external URLs.
+pub fn extract_markdown_links_from_line(line: &str) -> Vec<WikiLink> {
+    let mut links = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        // Skip [[wikilinks]] and ![images].
+        if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            if let Some(rel_end) = line[i + 2..].find("]]") {
+                i += 2 + rel_end + 2;
+                continue;
+            }
+            break;
+        }
+        let is_image = i > 0 && bytes[i - 1] == b'!';
+
+        // Find matching closing `]` on the same line without crossing another unescaped `[`.
+        let after_bracket = &line[i + 1..];
+        let Some(close_rel) = after_bracket.find(']') else {
+            break;
+        };
+        let label = after_bracket[..close_rel].trim();
+        let after_close_idx = i + 1 + close_rel + 1;
+
+        if is_image || !line[after_close_idx..].starts_with('(') {
+            i = after_close_idx;
+            continue;
+        }
+
+        let after_paren = &line[after_close_idx + 1..];
+        let Some(end_paren_rel) = after_paren.find(')') else {
+            break;
+        };
+        let raw_href = after_paren[..end_paren_rel].trim();
+        i = after_close_idx + 1 + end_paren_rel + 1;
+
+        if raw_href.is_empty() {
+            continue;
+        }
+        let target_token = if raw_href.starts_with('<') {
+            raw_href
+                .strip_prefix('<')
+                .and_then(|s| s.split('>').next())
+                .unwrap_or("")
+                .trim()
+        } else {
+            raw_href.split_whitespace().next().unwrap_or("").trim()
+        };
+
+        if target_token.is_empty()
+            || target_token.starts_with('#')
+            || target_token.contains("://")
+            || target_token.starts_with("mailto:")
+            || target_token.starts_with("tel:")
+            || target_token.starts_with("data:")
+            || target_token.starts_with("javascript:")
+        {
+            continue;
+        }
+
+        let clean_target = target_token.split(['#', '^']).next().unwrap_or("").trim();
+        let clean_lower = clean_target.to_ascii_lowercase();
+        let is_note_target = clean_lower.ends_with(".md")
+            || clean_lower.starts_with("/core/")
+            || clean_lower.starts_with("/semantic/")
+            || clean_lower.starts_with("/procedural/")
+            || clean_lower.starts_with("/episodic/");
+
+        if !is_note_target || clean_target.is_empty() {
+            continue;
+        }
+
+        links.push(WikiLink {
+            target: clean_target.to_string(),
+            raw_target: target_token.to_string(),
+            alias: (!label.is_empty()).then(|| label.to_string()),
+        });
+    }
+
+    links
+}
+
+/// Extracts standard Markdown note links across a full Markdown snippet/document,
+/// automatically ignoring fenced code blocks and inline backtick code spans.
+pub fn extract_markdown_links_from_markdown(markdown: &str) -> Vec<WikiLink> {
+    let mut links = Vec::new();
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    let mut fence_marker: Option<char> = None;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if let Some(marker) = fence_marker {
+            if is_closing_fence(trimmed, marker) {
+                fence_marker = None;
+            }
+            continue;
+        }
+        if let Some(marker) = opening_fence(trimmed) {
+            fence_marker = Some(marker);
+            continue;
+        }
+        let stripped = strip_inline_code(line);
+        for link in extract_markdown_links_from_line(&stripped) {
+            if seen.insert((link.target.clone(), link.alias.clone())) {
+                links.push(link);
+            }
+        }
+    }
+
+    links
+}
+
 fn extract_inline_tags_from_line(line: &str) -> Vec<String> {
     let mut tags = Vec::new();
     let chars: Vec<(usize, char)> = line.char_indices().collect();
@@ -689,5 +812,26 @@ importance: 0.92
             .iter()
             .any(|c| c.heading_path == "# 存储引擎 > ## 并发锁处理"
                 && c.chunk_text.contains("Aliases: BUSY_TIMEOUT, SQLite 锁")));
+    }
+
+    #[test]
+    fn extracts_standard_markdown_note_links_only() {
+        let path = VirtualPath::new("/semantic/docs/overview.md").unwrap();
+        let md = r##"# Overview
+
+See [Order Research](./order/research.md) and [SOP](../sop.md#step-1) plus [Engine](/semantic/order-matching-engine.md).
+Ignore [External](https://example.com/guide.md), ![Diagram](./arch.png), `[Ignored](./code.md)`, and [Section](#overview).
+"##;
+        let parsed = parse_wiki_document(&path, md, 800);
+        let targets: Vec<&str> = parsed.wikilinks.iter().map(|w| w.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            vec![
+                "./order/research.md",
+                "../sop.md",
+                "/semantic/order-matching-engine.md",
+            ]
+        );
+        assert_eq!(parsed.wikilinks[0].alias.as_deref(), Some("Order Research"));
     }
 }
