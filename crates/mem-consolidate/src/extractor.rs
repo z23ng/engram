@@ -269,7 +269,10 @@ pub(crate) fn render_card_markdown(
     if let Some(existing) = existing_markdown {
         let parsed = parse_wiki_document(target_path, existing, 800);
         for alias in parsed.aliases {
-            if !merged_aliases.iter().any(|a| a.eq_ignore_ascii_case(&alias)) {
+            if !merged_aliases
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&alias))
+            {
                 merged_aliases.push(alias);
             }
         }
@@ -459,7 +462,14 @@ fn select_episode_topic(ep: &SourceEpisode, parsed_title: &str) -> String {
         if lower.is_empty()
             || matches!(
                 lower.as_str(),
-                "episodic" | "log" | "session" | "bot" | "role/bot" | "role/dev" | "role/pm" | "consolidated"
+                "episodic"
+                    | "log"
+                    | "session"
+                    | "bot"
+                    | "role/bot"
+                    | "role/dev"
+                    | "role/pm"
+                    | "consolidated"
             )
         {
             continue;
@@ -500,11 +510,10 @@ fn extract_body_lines(raw: &str) -> Vec<&str> {
     let normalized = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let lines: Vec<&str> = normalized.lines().collect();
     if lines.first().is_some_and(|l| l.trim() == "---") {
-        if let Some(end_idx) = lines
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find_map(|(idx, line)| (line.trim() == "---" || line.trim() == "...").then_some(idx))
+        if let Some(end_idx) =
+            lines.iter().enumerate().skip(1).find_map(|(idx, line)| {
+                (line.trim() == "---" || line.trim() == "...").then_some(idx)
+            })
         {
             return lines[end_idx + 1..].to_vec();
         }
@@ -546,9 +555,7 @@ fn is_generic_heading(heading: &str) -> bool {
 }
 
 fn is_pure_wikilink_bullet(line: &str) -> bool {
-    let inner = line
-        .trim_start_matches(['-', '*', ' '])
-        .trim();
+    let inner = line.trim_start_matches(['-', '*', ' ']).trim();
     inner.starts_with("[[") && inner.ends_with("]]")
 }
 
@@ -623,10 +630,12 @@ fn classify_statement_tier(
         .any(|kw| lower.contains(kw) || heading_lower.contains(kw))
         || path_lower.contains("sop")
         || path_lower.contains("runbook")
-        || ep
-            .tags
-            .iter()
-            .any(|t| matches!(t.to_ascii_lowercase().as_str(), "sop" | "runbook" | "procedural" | "ops"))
+        || ep.tags.iter().any(|t| {
+            matches!(
+                t.to_ascii_lowercase().as_str(),
+                "sop" | "runbook" | "procedural" | "ops"
+            )
+        })
     {
         MemoryTier::Procedural
     } else {
@@ -688,12 +697,7 @@ fn contains_term(haystack_lower: &str, needle_lower: &str) -> bool {
         if !ascii || ascii_word_bounded(haystack_lower, abs, end) {
             return true;
         }
-        start = abs
-            + needle_lower
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(1);
+        start = abs + needle_lower.chars().next().map(char::len_utf8).unwrap_or(1);
     }
     false
 }

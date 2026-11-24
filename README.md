@@ -132,9 +132,10 @@ mem rewind <healthy_commit_id>
 # 5. 一键运行多 Agent 分支合并实战示例
 ./examples/multi_agent_branch_merge.sh
 
-# 6. 冷路径睡眠整理、HTTP Daemon（含内置 Web 控制台）与 POSIX FUSE 挂载
+# 6. 冷路径睡眠整理、多项目/单库 Web 服务端与 POSIX FUSE 挂载
 mem consolidate --auto-merge --archive --delete-branch
-mem daemon --host 127.0.0.1 --port 7700   # 启动后浏览器打开 http://127.0.0.1:7700/
+mem serve --data ~/.engram/server --listen 127.0.0.1:7878   # 多项目 React/CodeMirror/Graph 控制台 + WebDAV
+mem daemon --host 127.0.0.1 --port 7700                     # 单库 REST/SSE/图谱/零依赖 Web 控制台
 mem mount /tmp/engram-mnt --branch main
 ```
 
@@ -148,17 +149,20 @@ engram/
 │   ├── mem-core/        # 纯领域模型：VirtualPath、MemoryNode、BLAKE3 IDs、VCS 类型
 │   ├── mem-store/       # SQLite WAL 存储引擎：BLAKE3+zstd CAS、Merkle Tree、FTS5 与图谱表
 │   ├── mem-vcs/         # 版本控制内核：工作区叠加、分支、Diff、Rewind、3-Way Merge、GC
-│   ├── mem-search/      # Obsidian Wiki 解析、Ollama/OpenAI 向量、1-Hop 图谱混合检索、/core 编译
+│   ├── mem-search/      # Obsidian Wiki 解析、Ollama/OpenAI 向量、1-Hop 图谱混合检索与图谱导出、/core 编译
 │   ├── mem-consolidate/ # 冷路径睡眠整理：在隔离 consolidate/* 分支扫描 /episodic 提炼卡片与 SOP
-│   ├── mem-daemon/      # HTTP REST / SSE / Streamable+SSE MCP 守护进程服务端
+│   ├── mem-mcp/         # 协议无关 JSON-RPC 2.0 MCP 核心工具分发器
+│   ├── mem-server/      # 多项目团队服务端 (`mem serve`)：控制面、RBAC/审计、WebDAV 与内嵌 React UI
+│   ├── mem-daemon/      # 单库轻量 HTTP REST / SSE / 零依赖 Web UI / 双模 MCP 守护进程 (`mem daemon`)
 │   ├── mem-fuse/        # POSIX FUSE 挂载适配器（支持目录直接读写与只读快照挂载）
-│   └── mem-cli/         # `mem` 二进制：全量 CLI、Clack 引导向导、config、doctor 与 stdio MCP Server
+│   └── mem-cli/         # `mem` 二进制：全量 CLI、引导向导、`serve`/`admin`、`consolidate`、`daemon`、`mount` 与 stdio MCP
+├── web/                 # React 19 + TypeScript + Tailwind + CodeMirror + Knowledge Graph 控制台源码
 ├── bindings/            # 原生 Python (PyO3 + HTTP/SSE) 与 TypeScript (@engram-memory/sdk) SDKs
 ├── examples/            # 开箱即用的 Obsidian Vault 示例、多 Agent 脚本及 Python/TS 示例
-├── docs/              # 完整使用说明手册、架构设计、部署运维与演进路线图
-├── install.sh         # 一行远程安装脚本 (支持预编译二进制与源码回退)
-├── Dockerfile         # 多阶段生产容器与 docker-compose.yml
-└── .github/workflows/ # CI 自动化测试与跨平台预编译 Release 发布流水线
+├── docs/                # 使用手册、架构设计、部署运维、[多项目服务端设计 (SERVER_DESIGN.md)](./docs/SERVER_DESIGN.md)与路线图
+├── install.sh           # 一行远程安装脚本 (支持预编译二进制与源码回退)
+├── Dockerfile           # 多阶段生产容器与 docker-compose.yml
+└── .github/workflows/   # CI 自动化测试（Rust、Fmt/Clippy、React Web、Python/TS SDK）与 Release 发布流水线
 ```
 
 ---

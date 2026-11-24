@@ -309,9 +309,10 @@ mem mcp install --client claude-code
 | **`mem_merge`** | `source`, `target`, `strategy?` | 三路合并分支并自动检测层级与同路径冲突 |
 | **`mem_consolidate`** | `branch?`, `auto_merge?`, `archive_processed?`, `dry_run?`, `use_llm?` | 在隔离 `consolidate/*` 分支执行冷路径睡眠整理并可选自动合并回主干 |
 
-### 5.3 内置 Web 控制台、HTTP REST / SSE MCP 与 Python / TypeScript SDK 接入
+### 5.3 多项目 Web 控制台（`mem serve`）、单库 Daemon（`mem daemon`）与 SDK 接入
 
-- **内置 Web 控制台 & HTTP / SSE 守护进程**：运行 `mem daemon --host 127.0.0.1 --port 7700` 后，直接用浏览器打开 **`http://127.0.0.1:7700/`**（或 `/ui`）即可使用零依赖单页控制台（文件浏览器 + `[[Wikilink]]` Markdown 预览、混合检索与交互式 SVG 知识图谱 `GET /v1/graph`、Commit/Rewind/Diff/Merge、多角色 Ingest、Sleep Consolidation、`/core` 编译及实时 SSE 日志）；同时支持 `POST /mcp`（Streamable HTTP）、`GET /mcp/sse` + `POST /mcp/messages`（SSE MCP）、`/v1/*` REST API 与 `/v1/events` SSE 实时事件流。
+- **多项目团队控制台（`mem serve`）**：运行 `mem serve --data ~/.engram/server --listen 127.0.0.1:7878` 后访问 **`http://127.0.0.1:7878/`**，提供多项目切换、API Key RBAC（`admin / dev / pm / bot`）、CodeMirror 编辑器、**Knowledge Graph**（`/api/v1/projects/{p}/graph`）、审计日志与 Obsidian **WebDAV**（`/p/{p}/dav/{branch}/`），详见 [SERVER_DESIGN.md](./SERVER_DESIGN.md)。
+- **单库轻量 Web 控制台 & HTTP / SSE Daemon（`mem daemon`）**：运行 `mem daemon --host 127.0.0.1 --port 7700` 后，直接打开 **`http://127.0.0.1:7700/`**（或 `/ui`）即可使用零依赖单页控制台（文件浏览器 + `[[Wikilink]]` 预览、混合检索与 SVG 知识图谱 `GET /v1/graph`、Commit/Rewind/Diff/Merge、多角色 Ingest、Sleep Consolidation、`/core` 编译及实时 SSE 日志）；同时支持 `POST /mcp`（Streamable HTTP）、`GET /mcp/sse` + `POST /mcp/messages`（SSE MCP）、`/v1/*` REST API 与 `/v1/events` SSE 实时事件流。
 - **Python SDK (`bindings/python`)**：通过 PyO3 原生嵌入式绑定实现 5 行开箱即用：
   ```python
   import engram

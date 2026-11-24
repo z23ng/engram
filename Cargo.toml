@@ -6,6 +6,8 @@ members = [
     "crates/mem-vcs",
     "crates/mem-search",
     "crates/mem-consolidate",
+    "crates/mem-mcp",
+    "crates/mem-server",
     "crates/mem-daemon",
     "crates/mem-fuse",
     "crates/mem-cli",
@@ -32,18 +34,26 @@ thiserror = "2.0"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util"] }
-axum = "0.8"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util"] }
+axum = "0.8.9"
+tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22.1"
+bytes = "1.12"
+dav-server = { version = "0.12.0", default-features = false }
+getrandom = "0.4.3"
+rust-embed = { version = "8.14.0", features = ["mime-guess"] }
 mem-core = { path = "crates/mem-core" }
 mem-store = { path = "crates/mem-store" }
 mem-vcs = { path = "crates/mem-vcs" }
 mem-search = { path = "crates/mem-search" }
 mem-consolidate = { path = "crates/mem-consolidate" }
+mem-mcp = { path = "crates/mem-mcp" }
+mem-server = { path = "crates/mem-server" }
 mem-daemon = { path = "crates/mem-daemon" }
 mem-fuse = { path = "crates/mem-fuse" }

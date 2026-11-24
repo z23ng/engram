@@ -1,4 +1,4 @@
-//! Standard JSON-RPC 2.0 Model Context Protocol (MCP) server over stdio.
+//! Line-delimited JSON-RPC 2.0 MCP server over stdio.
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -24,8 +24,7 @@ pub fn run_stdio_server(
 
     let store = SqliteStore::open(&db_path).map_err(|e| io::Error::other(e.to_string()))?;
     let vcs = MemVcs::new(store);
-    vcs.init()
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    vcs.init().map_err(|e| io::Error::other(e.to_string()))?;
 
     let (engine, notice) = build_search_engine(vcs.clone(), &emb_cfg);
     if let Some(msg) = notice {
@@ -72,7 +71,6 @@ fn write_json_line<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {
     out.write_all(b"\n")?;
     out.flush()
 }
-
 /// Processes a single JSON-RPC 2.0 MCP request and returns `None` for notifications.
 pub fn handle_jsonrpc_request(
     vcs: &MemVcs,

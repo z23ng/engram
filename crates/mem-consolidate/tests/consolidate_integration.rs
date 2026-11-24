@@ -173,7 +173,10 @@ fn consolidation_auto_merge_and_archive_decays_importance_and_skips_reprocessing
 
     // Source episode importance decayed and tagged archived-episode.
     let updated_ep = vcs
-        .read(&Revision::BranchHead("main".into()), &vp("/episodic/day1.md"))
+        .read(
+            &Revision::BranchHead("main".into()),
+            &vp("/episodic/day1.md"),
+        )
         .unwrap()
         .unwrap();
     assert!((updated_ep.metadata.importance - 0.45).abs() < 0.01);

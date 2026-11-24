@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use mem_core::{
-    BlobId, CommitId, MemError, MemoryMetadata, Result, Revision, TreeEntry, TreeEntryType,
-    TreeId, VirtualPath,
+    BlobId, CommitId, MemError, MemoryMetadata, Result, Revision, TreeEntry, TreeEntryType, TreeId,
+    VirtualPath,
 };
 use mem_store::{
     get_commit_conn, get_ref_conn, get_tree_entries_conn, get_tree_entry_conn, put_tree_conn,
@@ -123,11 +123,7 @@ pub fn flatten_tree(conn: &Connection, root_tree_id: &TreeId) -> Result<FlatTree
 }
 
 /// Flattens a subtree `tree_id` rooted at an already-resolved virtual directory `prefix`.
-pub fn flatten_subtree_at(
-    conn: &Connection,
-    tree_id: &TreeId,
-    prefix: &str,
-) -> Result<FlatTree> {
+pub fn flatten_subtree_at(conn: &Connection, tree_id: &TreeId, prefix: &str) -> Result<FlatTree> {
     let mut out = BTreeMap::new();
     flatten_subtree_recursive(conn, tree_id, Some(prefix), &mut out)?;
     Ok(out)
@@ -250,7 +246,10 @@ fn build_tree_level(conn: &Connection, items: &[TreeBuildItem<'_>]) -> Result<Tr
                     detail: "path cannot be both a directory and a file".to_string(),
                 });
             }
-            subdirs.entry(first).or_default().push((rest, blob_id, meta));
+            subdirs
+                .entry(first)
+                .or_default()
+                .push((rest, blob_id, meta));
         }
     }
 

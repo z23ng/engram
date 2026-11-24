@@ -97,5 +97,11 @@ macro_rules! define_hash_id {
 }
 
 define_hash_id!(BlobId, "Content-addressed BLAKE3 hash of raw memory bytes.");
-define_hash_id!(TreeId, "Content-addressed BLAKE3 hash of a sorted Merkle tree node.");
-define_hash_id!(CommitId, "Content-addressed BLAKE3 hash of an immutable commit snapshot.");
+define_hash_id!(
+    TreeId,
+    "Content-addressed BLAKE3 hash of a sorted Merkle tree node."
+);
+define_hash_id!(
+    CommitId,
+    "Content-addressed BLAKE3 hash of an immutable commit snapshot."
+);

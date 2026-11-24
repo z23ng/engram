@@ -95,10 +95,7 @@ impl DaemonState {
             emb_cfg: cfg.embedding.clone(),
             db_path: cfg.db_path.clone(),
             event_tx,
-            auth_token: cfg
-                .auth_token
-                .clone()
-                .filter(|s| !s.trim().is_empty()),
+            auth_token: cfg.auth_token.clone().filter(|s| !s.trim().is_empty()),
             mcp_sessions: Arc::new(RwLock::new(HashMap::new())),
             started_at_ms: Utc::now().timestamp_millis(),
         })

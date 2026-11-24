@@ -11,8 +11,8 @@ pub use hash::{BlobId, CommitId, TreeId};
 pub use node::{MemoryMetadata, MemoryNode};
 pub use path::{MemoryTier, VirtualPath};
 pub use vcs::{
-    CommitInfo, DiffEntry, DiffKind, GcStats, MergeConflict, MergeOutcome, MergeStrategy,
-    Revision, TreeEntry, TreeEntryType,
+    CommitInfo, DiffEntry, DiffKind, GcStats, MergeConflict, MergeOutcome, MergeStrategy, Revision,
+    TreeEntry, TreeEntryType,
 };
 
 #[cfg(test)]
@@ -35,7 +35,9 @@ mod tests {
         assert!(tier_root.validate_file_path().is_err());
 
         assert_eq!(
-            VirtualPath::new("/episodic/2026/session.md").unwrap().tier(),
+            VirtualPath::new("/episodic/2026/session.md")
+                .unwrap()
+                .tier(),
             MemoryTier::Episodic
         );
         assert_eq!(

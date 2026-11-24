@@ -8,9 +8,7 @@ use mem_core::{
 use mem_store::{get_tree_entries_conn, workspace_list_conn};
 use rusqlite::Connection;
 
-use crate::tree::{
-    flatten_subtree_at, resolve_commit_tree_id, resolve_effective_tree, FlatTree,
-};
+use crate::tree::{flatten_subtree_at, resolve_commit_tree_id, resolve_effective_tree, FlatTree};
 
 /// Computes structured differences from `base` to `target`.
 ///

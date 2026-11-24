@@ -643,8 +643,8 @@ impl ConsolidationEngine {
                 updated_at_ms: Utc::now().timestamp_millis(),
                 ttl_seconds: None,
             };
-            let node =
-                MemoryNode::new(ep.path.clone(), ep.raw_text.as_bytes().to_vec()).with_metadata(meta);
+            let node = MemoryNode::new(ep.path.clone(), ep.raw_text.as_bytes().to_vec())
+                .with_metadata(meta);
             let blob_id = vcs.write_node(consolidate_branch, node)?;
             self.search.index_blob_if_needed(&ep.path, &blob_id)?;
         }
@@ -658,7 +658,11 @@ impl ConsolidationEngine {
         }
         digest.push_str("\n## Archived Episodic Sources\n");
         for ep in episodes {
-            digest.push_str(&format!("- {} (importance -> {:.2})\n", ep.path, (ep.importance * factor).clamp(0.05, 1.0)));
+            digest.push_str(&format!(
+                "- {} (importance -> {:.2})\n",
+                ep.path,
+                (ep.importance * factor).clamp(0.05, 1.0)
+            ));
         }
 
         let archive_node = MemoryNode::new(archive_path.clone(), digest.as_bytes().to_vec())

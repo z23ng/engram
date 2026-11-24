@@ -13,9 +13,18 @@ use serde_json::json;
 use crate::config::{EmbeddingProviderConfig, ProviderBackend};
 
 /// Abstraction over local or remote text embedding providers.
+/// `model_id` of a provider that produces no vectors (BM25-only search).
+pub const DISABLED_MODEL: &str = "disabled";
+
 pub trait EmbeddingProvider: Send + Sync {
     /// Human-readable identifier for this provider.
     fn provider_name(&self) -> &str;
+
+    /// Identity of the vectors this provider produces (provider plus model). The index stores it
+    /// per blob and re-embeds a blob when it changes. [`DISABLED_MODEL`] means "no vectors".
+    fn model_id(&self) -> String {
+        self.provider_name().to_string()
+    }
 
     /// Embeds a batch of document chunks into unit-length or raw float32 vectors.
     ///
@@ -105,6 +114,10 @@ impl EmbeddingProvider for DeterministicHashEmbedder {
         "deterministic-hash"
     }
 
+    fn model_id(&self) -> String {
+        format!("deterministic-hash:{}", self.dim)
+    }
+
     fn embed_batch(&self, texts: &[String]) -> Result<Option<Vec<Vec<f32>>>> {
         if texts.is_empty() {
             return Ok(Some(Vec::new()));
@@ -114,8 +127,7 @@ impl EmbeddingProvider for DeterministicHashEmbedder {
 }
 
 /// Custom HTTP POST transport callback `(url, bearer_api_key, json_body) -> response_json_body`.
-pub type HttpPostTransport =
-    Arc<dyn Fn(&str, Option<&str>, &str) -> Result<String> + Send + Sync>;
+pub type HttpPostTransport = Arc<dyn Fn(&str, Option<&str>, &str) -> Result<String> + Send + Sync>;
 
 /// OpenAI-compatible `/v1/embeddings` client supporting local Ollama and production OpenAI API.
 #[derive(Clone)]
@@ -146,10 +158,7 @@ impl OpenAiCompatibleEmbedder {
     }
 
     /// Creates an embedder with an explicit transport callback (useful for TLS clients or tests).
-    pub fn with_transport(
-        config: EmbeddingProviderConfig,
-        transport: HttpPostTransport,
-    ) -> Self {
+    pub fn with_transport(config: EmbeddingProviderConfig, transport: HttpPostTransport) -> Self {
         Self {
             config,
             timeout: Duration::from_secs(30),
@@ -206,6 +215,14 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
         }
     }
 
+    fn model_id(&self) -> String {
+        match (self.config.backend, self.config.dimensions) {
+            (ProviderBackend::Disabled, _) => DISABLED_MODEL.to_string(),
+            (_, Some(d)) => format!("{}:{}:{d}", self.provider_name(), self.config.model),
+            (_, None) => format!("{}:{}", self.provider_name(), self.config.model),
+        }
+    }
+
     fn embed_batch(&self, texts: &[String]) -> Result<Option<Vec<Vec<f32>>>> {
         if self.config.backend == ProviderBackend::Disabled {
             return Ok(None);
@@ -227,9 +244,12 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
             None => http_post_json(&url, api_key, &body, self.timeout)?,
         };
 
-        let mut parsed: OpenAiEmbeddingsResponse = serde_json::from_str(&raw_response).map_err(|e| {
-            MemError::Serialization(format!("invalid OpenAI-compatible embedding response: {e}"))
-        })?;
+        let mut parsed: OpenAiEmbeddingsResponse =
+            serde_json::from_str(&raw_response).map_err(|e| {
+                MemError::Serialization(format!(
+                    "invalid OpenAI-compatible embedding response: {e}"
+                ))
+            })?;
         parsed.data.sort_by_key(|d| d.index);
 
         if parsed.data.len() != texts.len() {
@@ -240,9 +260,7 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
             )));
         }
 
-        Ok(Some(
-            parsed.data.into_iter().map(|d| d.embedding).collect(),
-        ))
+        Ok(Some(parsed.data.into_iter().map(|d| d.embedding).collect()))
     }
 }
 
@@ -283,7 +301,9 @@ fn http_post_json(
         .to_socket_addrs()
         .map_err(|e| MemError::Storage(format!("failed to resolve '{addr_target}': {e}")))?
         .next()
-        .ok_or_else(|| MemError::Storage(format!("no socket addresses resolved for '{addr_target}'")))?;
+        .ok_or_else(|| {
+            MemError::Storage(format!("no socket addresses resolved for '{addr_target}'"))
+        })?;
 
     let mut stream = TcpStream::connect_timeout(&sock_addr, timeout)
         .map_err(|e| MemError::Storage(format!("failed to connect to '{addr_target}': {e}")))?;
@@ -365,10 +385,44 @@ fn http_post_json(
     let body_str = String::from_utf8(raw_body)?;
     if !(200..300).contains(&status_code) {
         return Err(MemError::Storage(format!(
-            "embedding endpoint returned HTTP {status_code}: {body_str}"
+            "HTTP {status_code} from {url}: {body_str}"
         )));
     }
     Ok(body_str)
+}
+
+/// curl arguments and stdin. Headers and body go through `--config -` on stdin, so the API key
+/// never appears in the process arguments (readable by any local user through `ps`).
+fn curl_invocation(
+    url: &str,
+    api_key: Option<&str>,
+    body: &str,
+    timeout: Duration,
+) -> (Vec<String>, String) {
+    let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut config = format!("header = {}\n", quote("Content-Type: application/json"));
+    if let Some(key) = api_key {
+        config.push_str(&format!(
+            "header = {}\n",
+            quote(&format!("Authorization: Bearer {key}"))
+        ));
+    }
+    config.push_str(&format!("data-binary = {}\n", quote(body)));
+    let args = [
+        "-sS",
+        "-X",
+        "POST",
+        "--max-time",
+        &timeout.as_secs().max(1).to_string(),
+        "--config",
+        "-",
+        "-w",
+        "\n%{http_code}",
+        url,
+    ]
+    .map(String::from)
+    .to_vec();
+    (args, config)
 }
 
 fn https_post_via_curl(
@@ -377,44 +431,28 @@ fn https_post_via_curl(
     body: &str,
     timeout: Duration,
 ) -> Result<String> {
-    let max_time = timeout.as_secs().max(1).to_string();
-    let mut cmd = Command::new("curl");
-    cmd.arg("-sS")
-        .arg("-X")
-        .arg("POST")
-        .arg("--max-time")
-        .arg(&max_time)
-        .arg("-H")
-        .arg("Content-Type: application/json");
-
-    if let Some(key) = api_key {
-        cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
-    }
-
-    cmd.arg("--data-binary")
-        .arg("@-")
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg(url)
+    let (args, config) = curl_invocation(url, api_key, body, timeout);
+    let mut child = Command::new("curl")
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|e| {
-        MemError::Storage(format!(
-            "failed to spawn system 'curl' for HTTPS embedding request to '{url}': {e}"
-        ))
-    })?;
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            MemError::Storage(format!(
+                "failed to spawn system 'curl' for HTTPS request to '{url}': {e}"
+            ))
+        })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(body.as_bytes()).map_err(|e| {
-            MemError::Storage(format!("failed to pipe embedding payload to curl: {e}"))
+        stdin.write_all(config.as_bytes()).map_err(|e| {
+            MemError::Storage(format!("failed to pipe request config to curl: {e}"))
         })?;
     }
 
-    let output = child.wait_with_output().map_err(|e| {
-        MemError::Storage(format!("failed waiting for curl HTTPS response: {e}"))
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| MemError::Storage(format!("failed waiting for curl HTTPS response: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -435,7 +473,7 @@ fn https_post_via_curl(
 
     if !(200..300).contains(&status_code) {
         return Err(MemError::Storage(format!(
-            "embedding endpoint returned HTTP {status_code}: {resp_body}"
+            "HTTP {status_code} from {url}: {resp_body}"
         )));
     }
 
@@ -478,22 +516,22 @@ pub fn encode_f32_vec(v: &[f32]) -> Vec<u8> {
 
 /// Decodes little-endian bytes from SQLite `chunk_index.embedding` back into `Vec<f32>`.
 pub fn decode_f32_vec(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(MemError::Storage(format!(
             "invalid float32 embedding byte length: {}",
             bytes.len()
         )));
     }
     let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in bytes.as_chunks::<4>().0 {
+        out.push(f32::from_le_bytes(*chunk));
     }
     Ok(out)
 }
 
 /// Computes cosine similarity between `a` and raw little-endian `f32` bytes without heap allocation.
 pub fn cosine_similarity_le_bytes(a: &[f32], le_bytes: &[u8]) -> Result<f32> {
-    if le_bytes.len() % 4 != 0 {
+    if !le_bytes.len().is_multiple_of(4) {
         return Err(MemError::Storage(format!(
             "invalid float32 embedding byte length: {}",
             le_bytes.len()
@@ -505,8 +543,8 @@ pub fn cosine_similarity_le_bytes(a: &[f32], le_bytes: &[u8]) -> Result<f32> {
     let mut dot = 0.0f64;
     let mut norm_a = 0.0f64;
     let mut norm_b = 0.0f64;
-    for (&x, chunk) in a.iter().zip(le_bytes.chunks_exact(4)) {
-        let y = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (&x, chunk) in a.iter().zip(le_bytes.as_chunks::<4>().0) {
+        let y = f32::from_le_bytes(*chunk);
         let xf = f64::from(x);
         let yf = f64::from(y);
         dot += xf * yf;
@@ -547,5 +585,93 @@ fn l2_normalize(vec: &mut [f32]) {
         for v in vec.iter_mut() {
             *v *= inv;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    use super::{curl_invocation, http_post_json, https_post_via_curl};
+
+    /// One-shot HTTP server: returns the raw request and answers with `status`.
+    fn serve_once(status: &str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let status = status.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut head, mut len) = (String::new(), 0usize);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let resp =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}");
+            stream.write_all(resp.as_bytes()).unwrap();
+            head + &String::from_utf8(body).unwrap()
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn the_api_key_never_appears_in_curl_arguments() {
+        let (args, stdin) = curl_invocation(
+            "https://h/v1",
+            Some("sk-SECRET\"x"),
+            "{}",
+            Duration::from_secs(5),
+        );
+        assert!(args.iter().all(|a| !a.contains("SECRET")), "{args:?}");
+        assert!(
+            stdin.contains(r#"header = "Authorization: Bearer sk-SECRET\"x""#),
+            "{stdin}"
+        );
+    }
+
+    #[test]
+    fn curl_sends_the_config_headers_and_the_exact_body() {
+        if std::process::Command::new("curl")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no curl binary on this host");
+            return;
+        }
+        let (url, server) = serve_once("200 OK");
+        let body = r#"{"a":"quote \" and backslash \\ and 中文"}"#;
+        assert_eq!(
+            https_post_via_curl(&url, Some("sk-test"), body, Duration::from_secs(10)).unwrap(),
+            "{}"
+        );
+        let req = server.join().unwrap();
+        assert!(req.contains("Authorization: Bearer sk-test"), "{req}");
+        assert!(req.ends_with(body), "{req}");
+    }
+
+    #[test]
+    fn http_errors_name_the_endpoint_url() {
+        let (url, server) = serve_once("500 Internal Server Error");
+        let err = http_post_json(&url, None, "{}", Duration::from_secs(5))
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        assert!(
+            err.contains(&format!("HTTP 500 from {url}")) && !err.contains("embedding endpoint"),
+            "{err}"
+        );
     }
 }

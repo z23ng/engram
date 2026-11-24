@@ -30,9 +30,6 @@ pub fn mount_blocking(vfs: MemoryPosixFs, mountpoint: &Path) -> io::Result<()> {
 
 /// Spawns a background FUSE session mounted at `mountpoint` (unmounts on drop).
 #[cfg(any(target_os = "linux", all(target_os = "macos", feature = "macos-fuse")))]
-pub fn spawn_mount(
-    vfs: MemoryPosixFs,
-    mountpoint: &Path,
-) -> io::Result<fuser::BackgroundSession> {
+pub fn spawn_mount(vfs: MemoryPosixFs, mountpoint: &Path) -> io::Result<fuser::BackgroundSession> {
     fuse_adapter::spawn_mount_impl(vfs, mountpoint)
 }

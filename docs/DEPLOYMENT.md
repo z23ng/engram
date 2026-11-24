@@ -83,20 +83,25 @@ mem vault export ./team-vault --branch main
 
 ---
 
-## 5. `mem-daemon` 服务与 Docker 容器化部署
+## 5. `mem serve` 多项目服务端与 `mem daemon` 守护进程
 
-对于需要多进程/多容器并发共享同一记忆库、Web 控制台可视化浏览、SSE 事件订阅或远程 HTTP MCP 接入的场景，可启动独立守护进程 `mem daemon`（或 `mem-daemon`）：
+Engram 提供两种互补的网络部署形态，按需选择：
 
-```bash
-# 本地或服务器启动 HTTP REST / Web UI / SSE / MCP Daemon（默认端口 7700，支持 Bearer 鉴权与定时整理）
-mem daemon --host 0.0.0.0 --port 7700 --token "$MEM_DAEMON_TOKEN" --consolidate-interval 3600 --consolidate-auto-merge
-```
+1. **多项目团队服务端（`mem serve` + `mem admin`）** — 内置 React 19 + CodeMirror + 交互式知识图谱控制台、API Key RBAC、审计日志与 Obsidian WebDAV 同步（详见 [SERVER_DESIGN.md](./SERVER_DESIGN.md)）：
+   ```bash
+   # 启动前如更新了前端源码需先构建 web/dist：npm --prefix web ci && npm --prefix web run build
+   mem serve --data ~/.engram/server --listen 0.0.0.0:7878
+   mem admin --data ~/.engram/server project create demo
+   mem admin --data ~/.engram/server key create --name alice --role dev --projects demo
+   ```
+   浏览器打开 **`http://127.0.0.1:7878/`**，填入 Key 即可管理多项目、WebDAV（`/p/<project>/dav/<branch>/`）与项目级 MCP（`/p/<project>/mcp`）。
 
-启动后可直接用浏览器访问内置零依赖单页 Web 控制台：**`http://127.0.0.1:7700/`**（或 `/ui`），支持：
-- 多分支切换、创建、删除、Markdown 源码编辑与可点击 `[[Wikilink]]` 实时预览；
-- 分支隔离的 Graph-RRF 混合检索与交互式 SVG 知识图谱（后端 `GET /v1/graph?branch=...`）；
-- 提交历史时间线、Rewind 时光倒流、Merkle Tree Diff 与三路分支合并；
-- 多角色 Ingest、冷路径 Sleep Consolidation、`/core` 提示词编译、存储 GC 与 `/v1/events` SSE 实时事件流（若启用了 `--token`，可在右上角 `Auth` 弹窗填入 Bearer Token）。
+2. **单库轻量守护进程（`mem daemon`）** — 直接挂载单一 `.db` 文件，内置零依赖单页 Web 控制台、`GET /v1/graph` 图谱、`/v1/events` SSE 事件流与 Python/TypeScript SDK 支持：
+   ```bash
+   # 本地或服务器启动 HTTP REST / Web UI / SSE / MCP Daemon（默认端口 7700，支持 Bearer 鉴权与定时整理）
+   mem daemon --host 0.0.0.0 --port 7700 --token "$MEM_DAEMON_TOKEN" --consolidate-interval 3600 --consolidate-auto-merge
+   ```
+   浏览器打开 **`http://127.0.0.1:7700/`**（或 `/ui`）即可使用。
 
 对于习惯容器化运维的服务器，可直接复用仓库内置的 [Dockerfile](../Dockerfile) 与 [docker-compose.yml](../docker-compose.yml)（默认即以 `mem daemon` 启动并暴露 `7700` 端口）：
 

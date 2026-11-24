@@ -22,6 +22,7 @@ pub fn merge_branches(
     source_branch: &str,
     target_branch: &str,
     strategy: MergeStrategy,
+    author: &str,
 ) -> Result<MergeOutcome> {
     let source_head = get_ref_conn(conn, source_branch)?
         .ok_or_else(|| MemError::BranchNotFound(source_branch.to_string()))?;
@@ -127,7 +128,13 @@ pub fn merge_branches(
         }
     }
 
-    resolve_hierarchy_collisions(&mut merged, &ours_map, &theirs_map, strategy, &mut conflicts);
+    resolve_hierarchy_collisions(
+        &mut merged,
+        &ours_map,
+        &theirs_map,
+        strategy,
+        &mut conflicts,
+    );
 
     if !conflicts.is_empty() {
         conflicts.sort_by(|a, b| a.path.cmp(&b.path));
@@ -143,7 +150,7 @@ pub fn merge_branches(
         conn,
         &merged_tree_id,
         &[target_head, source_head],
-        "mem-vcs",
+        author,
         &message,
         Utc::now().timestamp_millis(),
     )?;
@@ -358,8 +365,8 @@ fn bfs_ancestors(conn: &Connection, start: CommitId) -> Result<HashMap<CommitId,
     queue.push_back((start, 0));
 
     while let Some((cid, dist)) = queue.pop_front() {
-        let info = get_commit_conn(conn, &cid)?
-            .ok_or_else(|| MemError::CommitNotFound(cid.to_hex()))?;
+        let info =
+            get_commit_conn(conn, &cid)?.ok_or_else(|| MemError::CommitNotFound(cid.to_hex()))?;
         for parent in info.parent_ids {
             if let Entry::Vacant(e) = dists.entry(parent) {
                 e.insert(dist + 1);

@@ -63,10 +63,7 @@ fn cli_full_workflow_and_doctor() {
         .to_string();
     assert_ne!(c1, c0);
 
-    let search_hits = run(&["search", "BUSY_TIMEOUT"])
-        .as_array()
-        .unwrap()
-        .clone();
+    let search_hits = run(&["search", "BUSY_TIMEOUT"]).as_array().unwrap().clone();
     assert!(search_hits
         .iter()
         .any(|h| h["path"] == "/semantic/sqlite-wal.md"));
@@ -139,7 +136,7 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
             }
         }),
     );
-    assert_eq!(init_resp["result"]["serverInfo"]["name"], "ai-memory");
+    assert_eq!(init_resp["result"]["serverInfo"]["name"], "engram");
 
     // Notification expects no response.
     writeln!(
@@ -196,7 +193,9 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
             }
         }),
     );
-    let text = search_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let text = search_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(text.contains("/semantic/mcp_note.md"));
 
     // Commit main so draft/pm-inbox branched from main HEAD inherits mcp_note.md.
@@ -234,9 +233,12 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
         }),
     );
     assert_eq!(ingest_resp["result"]["isError"], false);
-    let ingest_payload: Value =
-        serde_json::from_str(ingest_resp["result"]["content"][0]["text"].as_str().unwrap())
-            .unwrap();
+    let ingest_payload: Value = serde_json::from_str(
+        ingest_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(ingest_payload["branch"], "draft/pm-inbox");
     assert_eq!(
         ingest_payload["path"],
@@ -288,7 +290,10 @@ fn mcp_stdio_server_initialize_list_and_call_tools() {
     let cons_payload: Value =
         serde_json::from_str(cons_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(cons_payload["episodes_scanned"], 1);
-    assert!(!cons_payload["distilled_cards"].as_array().unwrap().is_empty());
+    assert!(!cons_payload["distilled_cards"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     drop(stdin);
     let status = child.wait().unwrap();
@@ -341,7 +346,14 @@ fn cli_onboard_config_switch_and_mcp_auto_wiring() {
     };
 
     // 1. Run `mem onboard --mode lite --seed-demo --yes --json`.
-    let onboard_res = run_isolated(&["onboard", "--mode", "lite", "--seed-demo", "--yes", "--json"]);
+    let onboard_res = run_isolated(&[
+        "onboard",
+        "--mode",
+        "lite",
+        "--seed-demo",
+        "--yes",
+        "--json",
+    ]);
     assert_eq!(onboard_res["mode"], "lite");
     assert_eq!(onboard_res["seeded_notes"], 4);
     assert!(mem_home.join("config.json").exists());
@@ -360,9 +372,7 @@ fn cli_onboard_config_switch_and_mcp_auto_wiring() {
         .as_array()
         .unwrap()
         .clone();
-    assert!(hits
-        .iter()
-        .any(|h| h["path"] == "/semantic/sqlite-wal.md"));
+    assert!(hits.iter().any(|h| h["path"] == "/semantic/sqlite-wal.md"));
     assert!(hits
         .iter()
         .any(|h| h["path"] == "/procedural/sqlite-lock-sop.md"));
@@ -467,7 +477,10 @@ fn cli_collaborative_ingest_and_vault_sync_export() {
     );
     let ingest_json: Value = serde_json::from_slice(&ingest_out.stdout).unwrap();
     assert_eq!(ingest_json["branch"], "draft/pm-inbox");
-    assert_eq!(ingest_json["path"], "/semantic/product/payment-retry-rule.md");
+    assert_eq!(
+        ingest_json["path"],
+        "/semantic/product/payment-retry-rule.md"
+    );
     assert!(ingest_json["linked_notes"]
         .as_array()
         .unwrap()
@@ -532,7 +545,10 @@ fn cli_consolidate_isolated_branch_and_auto_merge() {
 
     // 1. Isolated consolidate/* branch leaves main untouched.
     let isolated = run(&["consolidate"]);
-    let cons_branch = isolated["consolidation_branch"].as_str().unwrap().to_string();
+    let cons_branch = isolated["consolidation_branch"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(cons_branch.starts_with("consolidate/"));
     assert_eq!(isolated["episodes_scanned"], 1);
     let main_list = run(&["ls", "--branch", "main"]).as_array().unwrap().clone();

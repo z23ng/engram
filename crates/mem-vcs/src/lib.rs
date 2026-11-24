@@ -222,10 +222,21 @@ impl MemVcs {
     }
 
     /// Returns the current [`CommitId`] targeted by `branch`.
+    /// Same as [`VersionControlEngine::merge`], with `author` on the merge commit.
+    pub fn merge_as(
+        &self,
+        source_branch: &str,
+        target_branch: &str,
+        strategy: MergeStrategy,
+        author: &str,
+    ) -> Result<MergeOutcome> {
+        self.store
+            .with_tx(|tx| merge_branches(tx, source_branch, target_branch, strategy, author))
+    }
+
     pub fn head_commit(&self, branch: &str) -> Result<CommitId> {
         self.store.with_conn(|conn| {
-            get_ref_conn(conn, branch)?
-                .ok_or_else(|| MemError::BranchNotFound(branch.to_string()))
+            get_ref_conn(conn, branch)?.ok_or_else(|| MemError::BranchNotFound(branch.to_string()))
         })
     }
 }
@@ -343,8 +354,9 @@ impl VersionControlEngine for MemVcs {
             }
 
             let target_commit = match from_rev {
-                Revision::BranchWorkspace(src) | Revision::BranchHead(src) => get_ref_conn(tx, src)?
-                    .ok_or_else(|| MemError::BranchNotFound(src.clone()))?,
+                Revision::BranchWorkspace(src) | Revision::BranchHead(src) => {
+                    get_ref_conn(tx, src)?.ok_or_else(|| MemError::BranchNotFound(src.clone()))?
+                }
                 Revision::Commit(cid) => {
                     if get_commit_conn(tx, cid)?.is_none() {
                         return Err(MemError::CommitNotFound(cid.to_hex()));
@@ -372,7 +384,8 @@ impl VersionControlEngine for MemVcs {
     }
 
     fn diff(&self, base: &Revision, target: &Revision) -> Result<Vec<DiffEntry>> {
-        self.store.with_conn(|conn| compute_diff(conn, base, target))
+        self.store
+            .with_conn(|conn| compute_diff(conn, base, target))
     }
 
     fn merge(
@@ -381,8 +394,7 @@ impl VersionControlEngine for MemVcs {
         target_branch: &str,
         strategy: MergeStrategy,
     ) -> Result<MergeOutcome> {
-        self.store
-            .with_tx(|tx| merge_branches(tx, source_branch, target_branch, strategy))
+        self.merge_as(source_branch, target_branch, strategy, "mem-vcs")
     }
 
     fn gc(&self) -> Result<GcStats> {

@@ -1,6 +1,7 @@
 //! Branch-aware hybrid search combining FTS5 BM25, vectors, and Obsidian 1-hop Wiki graph.
 
 use std::cmp::Ordering;
+use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -8,19 +9,23 @@ use std::sync::Arc;
 use mem_core::{BlobId, MemError, MemoryMetadata, Result, Revision, VirtualPath};
 use mem_store::cas::get_blob_conn;
 use mem_vcs::MemVcs;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler::{compile_core, CompiledCoreContext};
 use crate::config::{ConsolidateLlmConfig, SearchConfig};
+use crate::embedder::DISABLED_MODEL;
 use crate::embedder::{
     cosine_similarity_le_bytes, encode_f32_vec, EmbeddingProvider, NoopEmbedder,
 };
 use crate::ingest::{ingest_knowledge, IngestOutcome, IngestRequest};
-use crate::vault::{
-    export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats,
-};
+use crate::vault::{export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats};
 use crate::wiki::{parse_wiki_document, ParsedWikiDocument};
+
+/// Embedding texts per request, and the chunk budget of one write transaction.
+const EMBED_GROUP_CHUNKS: usize = 128;
+/// Blobs indexed by another model that one search re-embeds; the rest wait for later calls.
+const STALE_PER_PASS: usize = 32;
 
 /// Query parameters for branch-isolated hybrid search.
 #[derive(Debug, Clone)]
@@ -57,6 +62,53 @@ impl SearchRequest {
         self.top_k = top_k;
         self
     }
+}
+
+/// Active note node in a branch-isolated Obsidian Wiki knowledge graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphNode {
+    /// Canonical path identifier (matches `path`).
+    pub id: String,
+    /// Normalized virtual path in the branch.
+    pub path: String,
+    /// Document title extracted from frontmatter, `# H1`, or file stem.
+    pub title: String,
+    /// Memory tier segment (`core`, `semantic`, `procedural`, `episodic`).
+    pub tier: String,
+    /// Importance score `[0.0, 1.0]`.
+    pub importance: f32,
+    /// Normalized metadata tags attached to this node.
+    pub tags: Vec<String>,
+    /// Content-addressed BLAKE3 hash of the active blob.
+    pub blob_id: String,
+    /// Incoming resolved `[[Wikilink]]` edges inside this branch.
+    pub in_degree: usize,
+    /// Outgoing resolved `[[Wikilink]]` edges inside this branch.
+    pub out_degree: usize,
+}
+
+/// Directed `[[Wikilink]]` edge connecting two active notes within one branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphEdge {
+    /// Source virtual path containing the `[[Wikilink]]`.
+    pub source: String,
+    /// Resolved target virtual path within the same branch.
+    pub target: String,
+    /// Link classification (currently `"wikilink"`).
+    pub kind: String,
+    /// Original reference text inside `[[...]]`.
+    pub label: String,
+}
+
+/// Branch-scoped knowledge graph payload with zero cross-branch leakage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchGraph {
+    /// Branch name or commit hex evaluated.
+    pub branch: String,
+    /// Active memory nodes sorted deterministically by path.
+    pub nodes: Vec<GraphNode>,
+    /// Deduplicated intra-branch `[[Wikilink]]` edges sorted by `(source, target)`.
+    pub edges: Vec<GraphEdge>,
 }
 
 /// Ranked memory document returned by [`MemSearchEngine::search`].
@@ -133,11 +185,7 @@ impl MemSearchEngine {
     }
 
     /// Creates a hybrid search engine with a custom [`EmbeddingProvider`] and [`SearchConfig`].
-    pub fn new(
-        vcs: MemVcs,
-        embedder: Arc<dyn EmbeddingProvider>,
-        config: SearchConfig,
-    ) -> Self {
+    pub fn new(vcs: MemVcs, embedder: Arc<dyn EmbeddingProvider>, config: SearchConfig) -> Self {
         Self {
             vcs,
             embedder,
@@ -185,7 +233,14 @@ impl MemSearchEngine {
     }
 
     /// Indexes all uncached distinct blobs from `items`, computing embeddings outside the DB lock.
+    /// Blobs indexed by another model are re-embedded, at most [`STALE_PER_PASS`] per call, so a
+    /// model change never stalls one search; later calls catch up.
     pub fn index_unique_blobs(&self, items: &[(VirtualPath, BlobId)]) -> Result<IndexingStats> {
+        self.index_blobs(items, false)
+    }
+
+    /// `force` re-indexes every blob in `items`, fresh or not, with no per-call limit.
+    fn index_blobs(&self, items: &[(VirtualPath, BlobId)], force: bool) -> Result<IndexingStats> {
         let mut unique: BTreeMap<BlobId, VirtualPath> = BTreeMap::new();
         for (path, blob_id) in items {
             unique.entry(*blob_id).or_insert_with(|| path.clone());
@@ -199,14 +254,11 @@ impl MemSearchEngine {
             return Ok(stats);
         }
 
-        // Step 1: Under short read lock, identify blobs missing from chunk_index and read raw bytes.
-        struct PendingBlob {
-            blob_id: BlobId,
-            parsed: ParsedWikiDocument,
-            embeddings: Option<Vec<Vec<f32>>>,
-        }
-
+        // Step 1: Under short read lock, find blobs that are missing or stale (another model)
+        // and read their raw bytes.
+        let model = self.embedder.model_id();
         let mut missing_raw: Vec<(BlobId, VirtualPath, Vec<u8>)> = Vec::new();
+        let mut stale_taken = 0usize;
         self.vcs.store().with_conn(|conn| {
             let mut exists_stmt = conn
                 .prepare_cached("SELECT 1 FROM chunk_index WHERE blob_id = ?1 LIMIT 1")
@@ -216,9 +268,15 @@ impl MemSearchEngine {
                 let already_indexed = exists_stmt
                     .exists(params![blob_id.to_hex()])
                     .map_err(|e| MemError::Storage(format!("failed to check chunk_index: {e}")))?;
-                if already_indexed {
-                    stats.blobs_cache_hit += 1;
-                    continue;
+                if already_indexed && !force {
+                    if index_is_fresh(conn, &blob_id.to_hex(), &model)? {
+                        stats.blobs_cache_hit += 1;
+                        continue;
+                    }
+                    if stale_taken == STALE_PER_PASS {
+                        continue; // re-embedded by a later call; not a cache hit
+                    }
+                    stale_taken += 1;
                 }
 
                 let Some((bytes, _ct)) = get_blob_conn(conn, &blob_id)? else {
@@ -233,36 +291,62 @@ impl MemSearchEngine {
             return Ok(stats);
         }
 
-        // Step 2: Parse Markdown and compute embeddings completely outside the SQLite lock.
-        let mut parsed_blobs: Vec<(BlobId, ParsedWikiDocument)> = Vec::new();
-        let mut all_chunk_texts: Vec<String> = Vec::new();
-        let mut chunk_counts: Vec<usize> = Vec::new();
-
+        // Step 2: Parse outside the SQLite lock, then embed and write in groups of about
+        // EMBED_GROUP_CHUNKS chunks: a slow or failed call never touches rows of other groups.
+        let mut group: Vec<(BlobId, ParsedWikiDocument)> = Vec::new();
+        let mut group_chunks = 0usize;
         for (blob_id, path, bytes) in missing_raw {
             let Ok(text) = std::str::from_utf8(&bytes) else {
                 // Skip non-UTF-8 binary blobs gracefully.
                 continue;
             };
             let parsed = parse_wiki_document(&path, text, self.config.chunk_max_chars);
-            chunk_counts.push(parsed.chunks.len());
-            for chunk in &parsed.chunks {
-                all_chunk_texts.push(chunk.chunk_text.clone());
+            if !group.is_empty() && group_chunks + parsed.chunks.len() > EMBED_GROUP_CHUNKS {
+                self.write_group(std::mem::take(&mut group), &model, force, &mut stats)?;
+                group_chunks = 0;
             }
-            parsed_blobs.push((blob_id, parsed));
+            group_chunks += parsed.chunks.len();
+            group.push((blob_id, parsed));
         }
-
-        if parsed_blobs.is_empty() {
-            return Ok(stats);
+        if !group.is_empty() {
+            self.write_group(group, &model, force, &mut stats)?;
         }
+        Ok(stats)
+    }
 
-        let flat_embeddings = if all_chunk_texts.is_empty() {
-            None
-        } else {
+    /// Embeds one group (requests of at most EMBED_GROUP_CHUNKS texts) and writes its chunk,
+    /// full-text, link, and model rows in one transaction.
+    fn write_group(
+        &self,
+        parsed_blobs: Vec<(BlobId, ParsedWikiDocument)>,
+        model: &str,
+        force: bool,
+        stats: &mut IndexingStats,
+    ) -> Result<()> {
+        struct PendingBlob {
+            blob_id: BlobId,
+            parsed: ParsedWikiDocument,
+            embeddings: Option<Vec<Vec<f32>>>,
+        }
+        let chunk_counts: Vec<usize> = parsed_blobs.iter().map(|(_, p)| p.chunks.len()).collect();
+        let all_chunk_texts: Vec<String> = parsed_blobs
+            .iter()
+            .flat_map(|(_, p)| p.chunks.iter().map(|c| c.chunk_text.clone()))
+            .collect();
+        let mut flat_embeddings: Option<Vec<Vec<f32>>> =
+            (!all_chunk_texts.is_empty()).then(|| Vec::with_capacity(all_chunk_texts.len()));
+        for texts in all_chunk_texts.chunks(EMBED_GROUP_CHUNKS) {
             self.total_embedding_calls
                 .fetch_add(1, AtomicOrdering::Relaxed);
             stats.embedding_batches_called += 1;
-            self.embedder.embed_batch(&all_chunk_texts)?
-        };
+            match self.embedder.embed_batch(texts)? {
+                Some(vecs) => flat_embeddings.get_or_insert_with(Vec::new).extend(vecs),
+                None => {
+                    flat_embeddings = None;
+                    break;
+                }
+            }
+        }
 
         let mut pending: Vec<PendingBlob> = Vec::with_capacity(parsed_blobs.len());
         let mut vec_cursor = 0usize;
@@ -312,7 +396,19 @@ impl MemSearchEngine {
                     .exists(params![hex])
                     .map_err(|e| MemError::Storage(format!("failed tx existence check: {e}")))?;
                 if already {
-                    continue;
+                    if !force && index_is_fresh(tx, &hex, model)? {
+                        continue;
+                    }
+                    // Vectors from another model: drop this blob's rows, then insert them again.
+                    for sql in [
+                        "DELETE FROM chunk_index WHERE blob_id = ?1",
+                        "DELETE FROM fts_chunks WHERE blob_id = ?1",
+                        "DELETE FROM blob_links WHERE source_blob_id = ?1",
+                    ] {
+                        tx.execute(sql, params![hex]).map_err(|e| {
+                            MemError::Storage(format!("failed to drop stale index rows: {e}"))
+                        })?;
+                    }
                 }
 
                 let aliases_joined = item.parsed.aliases.join(" | ");
@@ -413,13 +509,56 @@ impl MemSearchEngine {
                     stats.links_indexed += 1;
                 }
 
+                tx.execute(
+                    "INSERT OR REPLACE INTO blob_index_model (blob_id, model) VALUES (?1, ?2)",
+                    params![hex, model],
+                )
+                .map_err(|e| MemError::Storage(format!("failed to record index model: {e}")))?;
                 stats.blobs_newly_indexed += 1;
             }
 
             Ok(())
-        })?;
+        })
+    }
 
-        Ok(stats)
+    /// `model_id` of the active embedder; [`DISABLED_MODEL`] means BM25-only search.
+    pub fn embedding_model(&self) -> String {
+        self.embedder.model_id()
+    }
+
+    /// Index coverage over all indexed blobs: `(files, files_with_vectors, chunks)`.
+    pub fn index_stats(&self) -> Result<(u64, u64, u64)> {
+        self.vcs.store().with_conn(|conn| {
+            conn.query_row(
+                "SELECT count(DISTINCT blob_id),
+                        count(DISTINCT CASE WHEN embedding IS NOT NULL THEN blob_id END),
+                        count(*)
+                 FROM chunk_index",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| MemError::Storage(format!("failed to read index stats: {e}")))
+        })
+    }
+
+    /// Indexes every branch view (head plus staged changes) again with the current embedder.
+    /// Blobs only in older commits keep their rows.
+    pub fn reindex_all(&self) -> Result<IndexingStats> {
+        let (_, with_vectors, _) = self.index_stats()?;
+        if self.embedder.model_id() == DISABLED_MODEL && with_vectors > 0 {
+            return Err(MemError::Storage(
+                "no embedding model is active: refusing to rebuild an index that holds vectors \
+                 (start the embedding provider, then rebuild)"
+                    .into(),
+            ));
+        }
+        let mut items = Vec::new();
+        for (branch, _) in self.vcs.store().list_refs()? {
+            let view = self.vcs.list(&Revision::BranchWorkspace(branch), None)?;
+            items.extend(view.into_iter().map(|(path, blob_id, _)| (path, blob_id)));
+        }
+        // Rows are replaced blob by blob, group by group: a failure keeps the old rows of the rest.
+        self.index_blobs(&items, true)
     }
 
     /// Executes branch-scoped hybrid search: BM25 + Vector + 1-hop Wiki Graph RRF fusion.
@@ -450,6 +589,7 @@ impl MemSearchEngine {
 
         // 2. Embed query outside the SQLite lock.
         let query_vec = self.embedder.embed_query(&req.query)?;
+        let model = self.embedder.model_id();
 
         // 3. Query FTS5, active embeddings, chunk titles/aliases, and active blob_links inside one lock.
         let active_data = self.vcs.store().with_conn(|conn| {
@@ -457,7 +597,7 @@ impl MemSearchEngine {
                 conn,
                 &paths_by_blob,
                 &req.query,
-                query_vec.as_deref(),
+                query_vec.as_deref().map(|v| (v, model.as_str())),
                 (req.top_k * 5).max(50),
             )
         })?;
@@ -470,7 +610,12 @@ impl MemSearchEngine {
             title_by_blob.insert(*blob_id, header.title.clone());
             if let Some(paths) = paths_by_blob.get(blob_id) {
                 for path in paths {
-                    register_resolver_keys(&mut wiki_resolver, path, &header.title, &header.aliases);
+                    register_resolver_keys(
+                        &mut wiki_resolver,
+                        path,
+                        &header.title,
+                        &header.aliases,
+                    );
                 }
             }
         }
@@ -725,10 +870,8 @@ impl MemSearchEngine {
         scored.truncate(req.top_k);
 
         // 11. Fetch chunk snippets for the winning top_k candidates.
-        let chunk_keys: Vec<(BlobId, usize)> = scored
-            .iter()
-            .map(|c| (c.blob_id, c.chunk_seq))
-            .collect();
+        let chunk_keys: Vec<(BlobId, usize)> =
+            scored.iter().map(|c| (c.blob_id, c.chunk_seq)).collect();
         let chunk_details = self
             .vcs
             .store()
@@ -780,11 +923,7 @@ impl MemSearchEngine {
     }
 
     /// Compiles `/core` memories for `rev` within `max_tokens` in `< 5ms` without LLM calls.
-    pub fn compile_core(
-        &self,
-        rev: &Revision,
-        max_tokens: usize,
-    ) -> Result<CompiledCoreContext> {
+    pub fn compile_core(&self, rev: &Revision, max_tokens: usize) -> Result<CompiledCoreContext> {
         compile_core(&self.vcs, rev, max_tokens)
     }
 
@@ -823,6 +962,210 @@ impl MemSearchEngine {
         llm_config: Option<&ConsolidateLlmConfig>,
     ) -> Result<IngestOutcome> {
         ingest_knowledge(self, req, llm_config)
+    }
+
+    /// Computes a strictly branch-isolated Wiki link graph over active files in `rev`.
+    pub fn branch_graph(&self, rev: &Revision) -> Result<BranchGraph> {
+        let branch = match rev {
+            Revision::BranchWorkspace(b) | Revision::BranchHead(b) => b.clone(),
+            Revision::Commit(cid) => cid.to_hex(),
+        };
+        let active = self.vcs.list(rev, None)?;
+        self.ensure_revision_indexed(rev, None)?;
+
+        let mut paths_by_blob: HashMap<BlobId, Vec<VirtualPath>> = HashMap::new();
+        for (path, blob_id, _) in &active {
+            paths_by_blob
+                .entry(*blob_id)
+                .or_default()
+                .push(path.clone());
+        }
+
+        let (headers_by_blob, raw_links) = self.vcs.store().with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS _mem_graph_active_blobs (blob_id TEXT PRIMARY KEY);
+                 DELETE FROM _mem_graph_active_blobs;",
+            )
+            .map_err(|e| {
+                MemError::Storage(format!("failed to prepare graph temp blobs table: {e}"))
+            })?;
+
+            {
+                let mut insert_stmt = conn
+                    .prepare_cached(
+                        "INSERT OR IGNORE INTO _mem_graph_active_blobs (blob_id) VALUES (?1)",
+                    )
+                    .map_err(|e| {
+                        MemError::Storage(format!("failed to prepare graph temp blob insert: {e}"))
+                    })?;
+                for blob_id in paths_by_blob.keys() {
+                    insert_stmt
+                        .execute(params![blob_id.to_hex()])
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to insert graph temp blob: {e}"))
+                        })?;
+                }
+            }
+
+            let res = (|| {
+                let mut headers_map: HashMap<BlobId, (String, Vec<String>)> = HashMap::new();
+                {
+                    let mut stmt = conn
+                        .prepare_cached(
+                            "SELECT c.blob_id, c.title, c.aliases
+                             FROM chunk_index AS c
+                             INNER JOIN _mem_graph_active_blobs AS a ON a.blob_id = c.blob_id
+                             WHERE c.chunk_seq = 0",
+                        )
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to prepare graph header query: {e}"))
+                        })?;
+                    let rows = stmt
+                        .query_map([], |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        })
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to query graph headers: {e}"))
+                        })?;
+                    for row in rows {
+                        let (hex, title, aliases_joined) = row.map_err(|e| {
+                            MemError::Storage(format!("failed to decode graph header row: {e}"))
+                        })?;
+                        let blob_id = BlobId::from_hex(&hex)?;
+                        let aliases = if aliases_joined.is_empty() {
+                            Vec::new()
+                        } else {
+                            aliases_joined
+                                .split(" | ")
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        };
+                        headers_map.insert(blob_id, (title, aliases));
+                    }
+                }
+
+                let mut links: Vec<(BlobId, String)> = Vec::new();
+                {
+                    let mut stmt = conn
+                        .prepare_cached(
+                            "SELECT l.source_blob_id, l.target_ref
+                             FROM blob_links AS l
+                             INNER JOIN _mem_graph_active_blobs AS a ON a.blob_id = l.source_blob_id
+                             WHERE l.link_kind = 'wikilink'",
+                        )
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to prepare graph links query: {e}"))
+                        })?;
+                    let rows = stmt
+                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                        .map_err(|e| {
+                            MemError::Storage(format!("failed to query graph wikilinks: {e}"))
+                        })?;
+                    for row in rows {
+                        let (hex, target_ref) = row.map_err(|e| {
+                            MemError::Storage(format!("failed to decode graph link row: {e}"))
+                        })?;
+                        links.push((BlobId::from_hex(&hex)?, target_ref));
+                    }
+                }
+
+                Ok((headers_map, links))
+            })();
+
+            let _ = conn.execute_batch("DELETE FROM _mem_graph_active_blobs;");
+            res
+        })?;
+
+        let mut wiki_resolver: HashMap<String, Vec<VirtualPath>> = HashMap::new();
+        for (path, blob_id, _) in &active {
+            let (title, aliases) = headers_by_blob
+                .get(blob_id)
+                .map(|(t, a)| (t.as_str(), a.as_slice()))
+                .unwrap_or_else(|| {
+                    let fallback = path
+                        .file_name()
+                        .and_then(|n| n.strip_suffix(".md").or(Some(n)))
+                        .unwrap_or_else(|| path.as_str());
+                    (fallback, &[])
+                });
+            register_resolver_keys(&mut wiki_resolver, path, title, aliases);
+        }
+
+        let mut unique_edges: BTreeMap<(String, String), String> = BTreeMap::new();
+        let mut out_degrees: HashMap<String, usize> = HashMap::new();
+        let mut in_degrees: HashMap<String, usize> = HashMap::new();
+
+        for (source_blob, target_ref) in raw_links {
+            let Some(source_paths) = paths_by_blob.get(&source_blob) else {
+                continue;
+            };
+            let Some(target_paths) = resolve_wiki_target(&wiki_resolver, &target_ref) else {
+                continue;
+            };
+            for src in source_paths {
+                for tgt in &target_paths {
+                    if src != tgt {
+                        let src_path = src.as_str().to_string();
+                        let tgt_path = tgt.as_str().to_string();
+                        if let BTreeEntry::Vacant(entry) =
+                            unique_edges.entry((src_path.clone(), tgt_path.clone()))
+                        {
+                            *out_degrees.entry(src_path).or_insert(0) += 1;
+                            *in_degrees.entry(tgt_path).or_insert(0) += 1;
+                            entry.insert(target_ref.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let nodes = active
+            .iter()
+            .map(|(path, blob_id, meta)| {
+                let p_str = path.as_str().to_string();
+                let title = headers_by_blob
+                    .get(blob_id)
+                    .map(|(t, _)| t.clone())
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .map(|f| f.strip_suffix(".md").unwrap_or(f).to_string())
+                            .unwrap_or_else(|| p_str.clone())
+                    });
+                GraphNode {
+                    id: p_str.clone(),
+                    path: p_str.clone(),
+                    title,
+                    tier: path.tier().as_str().to_string(),
+                    importance: meta.importance,
+                    tags: meta.tags.clone(),
+                    blob_id: blob_id.to_hex(),
+                    in_degree: in_degrees.get(&p_str).copied().unwrap_or(0),
+                    out_degree: out_degrees.get(&p_str).copied().unwrap_or(0),
+                }
+            })
+            .collect();
+
+        let edges = unique_edges
+            .into_iter()
+            .map(|((source, target), label)| GraphEdge {
+                source,
+                target,
+                kind: "wikilink".to_string(),
+                label,
+            })
+            .collect();
+
+        Ok(BranchGraph {
+            branch,
+            nodes,
+            edges,
+        })
     }
 }
 
@@ -865,7 +1208,8 @@ fn load_active_search_data(
     conn: &Connection,
     paths_by_blob: &HashMap<BlobId, Vec<VirtualPath>>,
     query: &str,
-    query_vec: Option<&[f32]>,
+    // The query vector and the model that made it.
+    query_vec: Option<(&[f32], &str)>,
     fts_limit: usize,
 ) -> Result<ActiveSearchData> {
     conn.execute_batch(
@@ -937,13 +1281,16 @@ fn load_active_search_data(
                 )
                 .map_err(|e| MemError::Storage(format!("failed to prepare FTS5 query: {e}")))?;
             let rows = stmt
-                .query_map(params![fts_query, i64::try_from(fts_limit).unwrap_or(100)], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, f64>(2)?,
-                    ))
-                })
+                .query_map(
+                    params![fts_query, i64::try_from(fts_limit).unwrap_or(100)],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, f64>(2)?,
+                        ))
+                    },
+                )
                 .map_err(|e| MemError::Storage(format!("failed to execute FTS5 query: {e}")))?;
             for row in rows {
                 let (hex, seq, score) =
@@ -985,7 +1332,9 @@ fn load_active_search_data(
                     ))
                 })
                 .map_err(|e| {
-                    MemError::Storage(format!("failed to query active chunks for lexical scan: {e}"))
+                    MemError::Storage(format!(
+                        "failed to query active chunks for lexical scan: {e}"
+                    ))
                 })?;
 
             let mut scored_lex: Vec<(BlobId, usize, f32)> = Vec::new();
@@ -993,7 +1342,8 @@ fn load_active_search_data(
                 let (hex, seq, title, aliases, tags, heading, body) = row.map_err(|e| {
                     MemError::Storage(format!("failed to decode lexical fallback row: {e}"))
                 })?;
-                let lex_score = score_lexical_match(query, &title, &aliases, &tags, &heading, &body);
+                let lex_score =
+                    score_lexical_match(query, &title, &aliases, &tags, &heading, &body);
                 if lex_score > 0.0 {
                     scored_lex.push((
                         BlobId::from_hex(&hex)?,
@@ -1010,18 +1360,21 @@ fn load_active_search_data(
 
         // 4. Score active embeddings zero-allocation directly from SQLite BLOB slices.
         let mut vec_hits = Vec::new();
-        if let Some(q_vec) = query_vec {
+        if let Some((q_vec, model)) = query_vec {
             let mut stmt = conn
                 .prepare_cached(
+                    // Only vectors of the active model: another model's vectors (not yet
+                    // re-embedded) give meaningless similarities.
                     "SELECT c.blob_id, c.chunk_seq, c.embedding
                      FROM chunk_index AS c
                      INNER JOIN _mem_active_blobs AS a ON a.blob_id = c.blob_id
+                     INNER JOIN blob_index_model AS m ON m.blob_id = c.blob_id AND m.model = ?1
                      WHERE c.embedding IS NOT NULL",
                 )
                 .map_err(|e| {
                     MemError::Storage(format!("failed to prepare embedding query: {e}"))
                 })?;
-            let mut rows = stmt.query([]).map_err(|e| {
+            let mut rows = stmt.query(params![model]).map_err(|e| {
                 MemError::Storage(format!("failed to query active embeddings: {e}"))
             })?;
             let mut vec_best_by_blob: HashMap<BlobId, (usize, f32)> = HashMap::new();
@@ -1084,10 +1437,12 @@ fn load_active_search_data(
                         r.get::<_, String>(3)?,
                     ))
                 })
-                .map_err(|e| MemError::Storage(format!("failed to query active blob_links: {e}")))?;
+                .map_err(|e| {
+                    MemError::Storage(format!("failed to query active blob_links: {e}"))
+                })?;
             for row in rows {
-                let (hex, kind, source_entity, target_ref) = row
-                    .map_err(|e| MemError::Storage(format!("failed to decode link row: {e}")))?;
+                let (hex, kind, source_entity, target_ref) =
+                    row.map_err(|e| MemError::Storage(format!("failed to decode link row: {e}")))?;
                 links.push(ActiveLinkRow {
                     source_blob_id: BlobId::from_hex(&hex)?,
                     link_kind: kind,
@@ -1127,16 +1482,15 @@ fn fetch_chunk_details(
             continue;
         }
         let seq_i64 = i64::try_from(seq).unwrap_or(0);
-        let row = stmt
-            .query_row(params![blob_id.to_hex(), seq_i64], |r| {
-                Ok(ChunkDetail {
-                    title: r.get(0)?,
-                    heading_path: r.get(1)?,
-                    raw_snippet: r.get(2)?,
-                    start_line: usize::try_from(r.get::<_, i64>(3)?.max(1)).unwrap_or(1),
-                    end_line: usize::try_from(r.get::<_, i64>(4)?.max(1)).unwrap_or(1),
-                })
-            });
+        let row = stmt.query_row(params![blob_id.to_hex(), seq_i64], |r| {
+            Ok(ChunkDetail {
+                title: r.get(0)?,
+                heading_path: r.get(1)?,
+                raw_snippet: r.get(2)?,
+                start_line: usize::try_from(r.get::<_, i64>(3)?.max(1)).unwrap_or(1),
+                end_line: usize::try_from(r.get::<_, i64>(4)?.max(1)).unwrap_or(1),
+            })
+        });
         if let Ok(detail) = row {
             out.insert((blob_id, seq), detail);
         }
@@ -1369,4 +1723,18 @@ fn resolve_wiki_target(
         return Some(found.clone());
     }
     None
+}
+
+/// An indexed blob is fresh when no model is active (keep whatever exists, so an embedder
+/// outage never drops vectors) or when its vectors were made by `model`.
+fn index_is_fresh(conn: &Connection, blob_hex: &str, model: &str) -> Result<bool> {
+    if model == DISABLED_MODEL {
+        return Ok(true);
+    }
+    // No row (an index older than blob_index_model) means the model is unknown: stale.
+    let stored: Option<String> = conn
+        .prepare_cached("SELECT model FROM blob_index_model WHERE blob_id = ?1")
+        .and_then(|mut stmt| stmt.query_row(params![blob_hex], |r| r.get(0)).optional())
+        .map_err(|e| MemError::Storage(format!("failed to read index model: {e}")))?;
+    Ok(stored.as_deref() == Some(model))
 }

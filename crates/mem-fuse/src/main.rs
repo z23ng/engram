@@ -40,11 +40,18 @@ fn run() -> Result<(), String> {
             }
             "--branch" | "-b" => {
                 i += 1;
-                branch = args.get(i).ok_or("--branch requires a branch name")?.clone();
+                branch = args
+                    .get(i)
+                    .ok_or("--branch requires a branch name")?
+                    .clone();
             }
             "--commit" | "-c" => {
                 i += 1;
-                commit_hex = Some(args.get(i).ok_or("--commit requires a commit hash")?.clone());
+                commit_hex = Some(
+                    args.get(i)
+                        .ok_or("--commit requires a commit hash")?
+                        .clone(),
+                );
             }
             "--read-only" | "--ro" => {
                 read_only = true;
@@ -60,9 +67,15 @@ fn run() -> Result<(), String> {
         i += 1;
     }
 
-    let target_dir = mountpoint.ok_or("usage: mem-fuse <MOUNTPOINT> [--db <PATH>] [--branch <b> | --commit <cid>] [--read-only]")?;
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("failed to prepare mountpoint '{}': {e}", target_dir.display()))?;
+    let target_dir = mountpoint.ok_or(
+        "usage: mem-fuse <MOUNTPOINT> [--db <PATH>] [--branch <b> | --commit <cid>] [--read-only]",
+    )?;
+    std::fs::create_dir_all(&target_dir).map_err(|e| {
+        format!(
+            "failed to prepare mountpoint '{}': {e}",
+            target_dir.display()
+        )
+    })?;
 
     let store = SqliteStore::open(&db_path).map_err(|e| e.to_string())?;
     let vcs = MemVcs::new(store);

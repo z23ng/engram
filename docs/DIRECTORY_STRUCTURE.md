@@ -27,6 +27,7 @@ engram/
 │   ├── DIRECTORY_STRUCTURE.md
 │   ├── DEPLOYMENT.md
 │   ├── USER_GUIDE.md
+│   ├── SERVER_DESIGN.md        # 多项目服务端 (mem serve) 与 React 控制台架构设计
 │   └── ROADMAP.md
 ├── examples/
 │   ├── obsidian-vault/         # 示例 Obsidian 双链知识库
@@ -37,11 +38,14 @@ engram/
 │   ├── mem-core/               # 领域模型层：VirtualPath、MemoryNode、Tier、Commit、Branch、Diff、Error
 │   ├── mem-store/              # 存储底座：SQLite WAL、BLAKE3 CAS、zstd 压缩、FTS5/图谱 Schema
 │   ├── mem-vcs/                # 版本控制内核：Merkle Tree、Branch/Checkout、Commit、Diff、Rewind、3-Way Merge、GC
-│   ├── mem-search/             # 检索与协同层：Obsidian Wiki 解析、混合检索、/core 热编译、ingest 自动织链与双向 Vault 桥接
+│   ├── mem-search/             # 检索与协同层：Obsidian Wiki 解析、混合检索与图谱导出、/core 热编译、ingest 与 Vault 桥接
 │   ├── mem-consolidate/        # 冷路径整理引擎：隔离 consolidate/* 分支扫描 /episodic/、去重提炼 /semantic/ & /procedural/ 与归档衰减
-│   ├── mem-daemon/             # HTTP REST / SSE / Streamable+SSE MCP 守护进程服务端（含 12 个 MCP Tools）
+│   ├── mem-mcp/                # 协议无关的 JSON-RPC 2.0 MCP 核心工具分发器
+│   ├── mem-server/             # 多项目团队服务端 (`mem serve`)：控制面、API Key RBAC、审计、WebDAV 与内嵌 React UI
+│   ├── mem-daemon/             # 单库轻量 HTTP REST / SSE / 零依赖 Web UI / 双模 MCP 守护进程 (`mem daemon`)
 │   ├── mem-fuse/               # 类 LayerFS 的 POSIX FUSE 虚拟文件系统挂载适配器（mem-fuse / mem mount）
-│   └── mem-cli/                # 统一二进制 `mem`：CLI、Clack 风格 `onboard` 向导、`config`、`doctor`、`consolidate`、`daemon`、`mount` 与 stdio `mcp`
+│   └── mem-cli/                # 统一二进制 `mem`：CLI、引导向导、`serve`/`admin`、`consolidate`、`daemon`、`mount` 与 stdio `mcp`
+├── web/                        # React 19 + TypeScript + Tailwind + CodeMirror + SVG 知识图谱 Web 控制台源码
 └── bindings/
     ├── python/                 # `engram` Python SDK（PyO3 原生嵌入式扩展 + HTTP/SSE Client）
     └── typescript/             # `@engram-memory/sdk` TypeScript SDK（HTTP/SSE Client + LocalEngram）

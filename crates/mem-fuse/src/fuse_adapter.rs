@@ -136,10 +136,7 @@ impl Filesystem for EngramFuseFs {
             reply.error(Errno::EINVAL);
             return;
         };
-        match self
-            .vfs
-            .rename(parent.0, old_name, newparent.0, new_name)
-        {
+        match self.vfs.rename(parent.0, old_name, newparent.0, new_name) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(to_errno(err)),
         }
@@ -302,7 +299,9 @@ impl Filesystem for EngramFuseFs {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        reply.statfs(1_048_576, 524_288, 524_288, 1_000_000, 999_000, 4096, 255, 4096);
+        reply.statfs(
+            1_048_576, 524_288, 524_288, 1_000_000, 999_000, 4096, 255, 4096,
+        );
     }
 }
 

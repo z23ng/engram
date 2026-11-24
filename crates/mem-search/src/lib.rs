@@ -2,6 +2,7 @@
 
 pub mod compiler;
 pub mod config;
+pub mod consolidate;
 pub mod embedder;
 pub mod hybrid;
 pub mod ingest;
@@ -12,12 +13,17 @@ pub use compiler::{compile_core, estimate_tokens, CompiledCoreContext};
 pub use config::{
     ConsolidateLlmConfig, EmbeddingProviderConfig, MemConfig, ProviderBackend, SearchConfig,
 };
+pub use consolidate::{
+    consolidate, consolidate_retry, note_is_valid, ConsolidateOutcome, ConsolidateStatus,
+};
 pub use embedder::{
     cosine_similarity, cosine_similarity_le_bytes, decode_f32_vec, encode_f32_vec,
     post_json_http_or_curl, DeterministicHashEmbedder, EmbeddingProvider, HttpPostTransport,
-    NoopEmbedder, OpenAiCompatibleEmbedder,
+    NoopEmbedder, OpenAiCompatibleEmbedder, DISABLED_MODEL,
 };
-pub use hybrid::{IndexingStats, MemSearchEngine, SearchHit, SearchRequest};
+pub use hybrid::{
+    BranchGraph, GraphEdge, GraphNode, IndexingStats, MemSearchEngine, SearchHit, SearchRequest,
+};
 pub use ingest::{ingest_knowledge, IngestOutcome, IngestRequest, IngestRole};
 pub use vault::{
     export_vault, import_vault, init_vault_template, sync_vault, VaultExportStats,

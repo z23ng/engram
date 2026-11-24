@@ -287,11 +287,7 @@ pub fn sync_vault(
 ///
 /// The resulting directory mirrors `/core`, `/semantic`, `/procedural`, `/episodic` cleanly
 /// and can be edited in Obsidian and re-synced via [`sync_vault`].
-pub fn export_vault(
-    vcs: &MemVcs,
-    rev: &Revision,
-    vault_dir: &Path,
-) -> Result<VaultExportStats> {
+pub fn export_vault(vcs: &MemVcs, rev: &Revision, vault_dir: &Path) -> Result<VaultExportStats> {
     fs::create_dir_all(vault_dir).map_err(|e| {
         MemError::Storage(format!(
             "failed to create export directory '{}': {e}",
@@ -405,15 +401,12 @@ fn write_markdown_file_to_vfs(
 
 fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = fs::read_dir(dir).map_err(|e| {
-        MemError::Storage(format!(
-            "failed to read directory '{}': {e}",
-            dir.display()
-        ))
+        MemError::Storage(format!("failed to read directory '{}': {e}", dir.display()))
     })?;
 
     for entry_res in entries {
-        let entry = entry_res
-            .map_err(|e| MemError::Storage(format!("failed to read dir entry: {e}")))?;
+        let entry =
+            entry_res.map_err(|e| MemError::Storage(format!("failed to read dir entry: {e}")))?;
         let file_name = entry.file_name();
         let name_str = file_name.to_string_lossy();
         if is_skipped_vault_entry(&name_str) {
@@ -481,7 +474,11 @@ mod tests {
         .unwrap();
         fs::create_dir_all(vault.join(".obsidian")).unwrap();
         fs::write(vault.join(".obsidian/config.md"), "# Ignored").unwrap();
-        fs::write(vault.join("_templates/custom-ignored.md"), "# Ignored template").unwrap();
+        fs::write(
+            vault.join("_templates/custom-ignored.md"),
+            "# Ignored template",
+        )
+        .unwrap();
 
         let engine = test_engine();
         let sync_stats = sync_vault(&engine, &vault, "main").unwrap();
@@ -499,6 +496,8 @@ mod tests {
         assert_eq!(export_stats.files_exported, 3);
         assert!(export_dir.join("core/system.md").exists());
         assert!(export_dir.join("semantic/product/checkout-prd.md").exists());
-        assert!(export_dir.join("semantic/architecture/retry-arch.md").exists());
+        assert!(export_dir
+            .join("semantic/architecture/retry-arch.md")
+            .exists());
     }
 }

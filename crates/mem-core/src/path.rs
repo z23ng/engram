@@ -69,7 +69,10 @@ impl VirtualPath {
                 "path must start with '/': {raw}"
             )));
         }
-        if raw.chars().any(|c| c == '\\' || c == '\0' || c.is_control()) {
+        if raw
+            .chars()
+            .any(|c| c == '\\' || c == '\0' || c.is_control())
+        {
             return Err(MemError::InvalidPath(format!(
                 "path contains disallowed control or backslash characters: {raw}"
             )));

@@ -69,8 +69,13 @@ fn posix_vfs_supports_create_write_read_truncate_mkdir_rename_unlink_and_search(
     fs.release(wfh).unwrap();
 
     // Atomic editor rename: draft.md.tmp -> posix-note.md.
-    fs.rename(notes_dir.ino, "draft.md.tmp", notes_dir.ino, "posix-note.md")
-        .unwrap();
+    fs.rename(
+        notes_dir.ino,
+        "draft.md.tmp",
+        notes_dir.ino,
+        "posix-note.md",
+    )
+    .unwrap();
     assert_eq!(
         fs.lookup(notes_dir.ino, "draft.md.tmp"),
         Err(PosixError::Enoent)
@@ -107,7 +112,10 @@ fn posix_vfs_supports_create_write_read_truncate_mkdir_rename_unlink_and_search(
     assert_eq!(fs.lookup(sem_dir.ino, "notes"), Err(PosixError::Enoent));
     let moved_dir = fs.lookup(sem_dir.ino, "archived_notes").unwrap();
     assert_eq!(moved_dir.ino, notes_dir.ino);
-    assert_eq!(fs.getattr(notes_dir.ino).unwrap().kind, PosixFileKind::Directory);
+    assert_eq!(
+        fs.getattr(notes_dir.ino).unwrap().kind,
+        PosixFileKind::Directory
+    );
     let moved_file = fs.lookup(moved_dir.ino, "posix-note.md").unwrap();
     assert_eq!(moved_file.size, 10);
     assert!(vcs
@@ -146,9 +154,15 @@ fn posix_vfs_enforces_read_only_for_commits_and_ro_mounts() {
     let core = ro_fs.lookup(ROOT_INO, "core").unwrap();
     assert_eq!(ro_fs.create(core.ino, "new.md"), Err(PosixError::Erofs));
     assert_eq!(ro_fs.mkdir(core.ino, "sub"), Err(PosixError::Erofs));
-    assert_eq!(ro_fs.unlink(core.ino, "immutable.md"), Err(PosixError::Erofs));
+    assert_eq!(
+        ro_fs.unlink(core.ino, "immutable.md"),
+        Err(PosixError::Erofs)
+    );
     let file_attr = ro_fs.lookup(core.ino, "immutable.md").unwrap();
-    assert_eq!(ro_fs.open(file_attr.ino, true, false), Err(PosixError::Erofs));
+    assert_eq!(
+        ro_fs.open(file_attr.ino, true, false),
+        Err(PosixError::Erofs)
+    );
 }
 
 #[cfg(target_os = "linux")]

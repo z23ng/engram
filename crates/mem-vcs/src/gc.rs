@@ -23,8 +23,8 @@ pub fn run_gc(conn: &Connection) -> Result<GcStats> {
 
     let mut root_trees: Vec<TreeId> = Vec::new();
     while let Some(cid) = commit_queue.pop_front() {
-        let info = get_commit_conn(conn, &cid)?
-            .ok_or_else(|| MemError::CommitNotFound(cid.to_hex()))?;
+        let info =
+            get_commit_conn(conn, &cid)?.ok_or_else(|| MemError::CommitNotFound(cid.to_hex()))?;
         root_trees.push(info.tree_id);
         for parent in info.parent_ids {
             if reachable_commits.insert(parent) {
@@ -60,16 +60,14 @@ pub fn run_gc(conn: &Connection) -> Result<GcStats> {
     // 3. Mark blobs referenced by staged workspace entries.
     {
         let mut stmt = conn
-            .prepare_cached(
-                "SELECT blob_id FROM workspace_entries WHERE blob_id IS NOT NULL",
-            )
+            .prepare_cached("SELECT blob_id FROM workspace_entries WHERE blob_id IS NOT NULL")
             .map_err(|e| MemError::Storage(format!("failed to prepare workspace gc scan: {e}")))?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))
             .map_err(|e| MemError::Storage(format!("failed to scan workspace blobs: {e}")))?;
         for row in rows {
-            let hex =
-                row.map_err(|e| MemError::Storage(format!("failed to decode workspace blob: {e}")))?;
+            let hex = row
+                .map_err(|e| MemError::Storage(format!("failed to decode workspace blob: {e}")))?;
             reachable_blobs.insert(BlobId::from_hex(&hex)?);
         }
     }
@@ -133,7 +131,8 @@ where
 
     let mut unreachable = Vec::new();
     for row in rows {
-        let hex = row.map_err(|e| MemError::Storage(format!("failed to decode {table} id: {e}")))?;
+        let hex =
+            row.map_err(|e| MemError::Storage(format!("failed to decode {table} id: {e}")))?;
         if !is_reachable(&hex)? {
             unreachable.push(hex);
         }

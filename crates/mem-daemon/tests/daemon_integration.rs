@@ -25,9 +25,7 @@ async fn http_request(
         .map(|v| serde_json::to_string(&v).unwrap())
         .unwrap_or_default();
 
-    let mut req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n"
-    );
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
     if let Some(tok) = token {
         req.push_str(&format!("Authorization: Bearer {tok}\r\n"));
     }
@@ -657,8 +655,14 @@ async fn daemon_web_ui_and_branch_graph_isolation() {
     for path in ["/", "/ui"] {
         let resp = http_request(addr, "GET", path, None, None).await;
         assert_eq!(resp.status, 200, "expected 200 for {path}");
-        assert!(resp.body.contains("Engram"), "expected Engram title in {path}");
-        assert!(resp.body.contains("/v1/graph"), "expected graph endpoint in {path}");
+        assert!(
+            resp.body.contains("Engram"),
+            "expected Engram title in {path}"
+        );
+        assert!(
+            resp.body.contains("/v1/graph"),
+            "expected graph endpoint in {path}"
+        );
     }
 
     // /v1/graph still enforces bearer authentication.
@@ -754,7 +758,9 @@ async fn daemon_web_ui_and_branch_graph_isolation() {
     let main_nodes = main_graph["nodes"].as_array().unwrap();
     let main_edges = main_graph["edges"].as_array().unwrap();
     assert_eq!(main_nodes.len(), 2);
-    assert!(main_nodes.iter().all(|n| n["path"] != "/semantic/secret-idea.md"));
+    assert!(main_nodes
+        .iter()
+        .all(|n| n["path"] != "/semantic/secret-idea.md"));
     assert!(main_edges.iter().any(|e| {
         e["source"] == "/semantic/architecture.md" && e["target"] == "/procedural/sqlite-wal.md"
     }));
