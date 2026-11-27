@@ -310,3 +310,93 @@ fn consolidation_supports_mock_llm_and_graceful_or_strict_fallback() {
     );
     assert!(strict_err.is_err());
 }
+
+#[test]
+fn causal_sop_rendering_rewind_pitfalls_and_expired_sweep() {
+    let search = setup_engine();
+    let vcs = search.vcs();
+
+    // Seed a committed TTL-expired episode, an active procedural episode with error codes & multi-line bullets,
+    // and trigger a rewind so consolidation mines an anti-pattern pitfall card too.
+    let expired_ep = MemoryNode::new(
+        vp("/episodic/stale-ttl.md"),
+        b"Stale scratch note waiting to be swept.".to_vec(),
+    )
+    .with_metadata(MemoryMetadata {
+        content_type: "text/markdown".to_string(),
+        importance: 0.4,
+        tags: vec!["episodic".to_string()],
+        created_at_ms: 1_600_000_000_000,
+        updated_at_ms: 1_600_000_000_000,
+        ttl_seconds: Some(10),
+    });
+    let active_ep = make_episode(
+        "/episodic/db-incident.md",
+        "# Incident Runbook\n- Symptom: Error SQLITE_BUSY and HTTP 503 timeout occurred during checkpoint\n  caused by missing busy_timeout=5000 on reader pool.\n- SOP: Set PRAGMA busy_timeout = 5000 before enabling WAL mode.\n- Verify PRAGMA busy_timeout returns 5000 on active worker connections.\n",
+        0.9,
+        vec!["episodic", "sqlite", "runbook"],
+        1_700_000_005_000,
+    );
+    vcs.write("main", expired_ep).unwrap();
+    vcs.write("main", active_ep).unwrap();
+    let safe_cid = vcs.commit("main", "dev", "seed episode and ttl").unwrap();
+
+    // Bad commit that gets rewound.
+    vcs.write_node(
+        "main",
+        MemoryNode::new(
+            vp("/semantic/unsafe-pragma.md"),
+            b"# Unsafe Pragma\nNever disable synchronous=OFF in production.".to_vec(),
+        ),
+    )
+    .unwrap();
+    vcs.commit("main", "dev", "unsafe change").unwrap();
+    vcs.rewind("main", &safe_cid).unwrap();
+
+    let consolidator = ConsolidationEngine::new(search.clone());
+    let report = consolidator
+        .consolidate(
+            &ConsolidationRequest::new("main")
+                .with_auto_merge(true)
+                .with_delete_branch_on_merge(true),
+        )
+        .unwrap();
+
+    assert_eq!(report.pitfalls_distilled, 1);
+    assert_eq!(report.expired_swept, 1);
+
+    // Causal SOP card structure & UPPER_SNAKE_CASE error alias extraction.
+    let sop_card = report
+        .distilled_cards
+        .iter()
+        .find(|c| c.tier == MemoryTier::Procedural && !c.path.as_str().contains("/pitfalls/"))
+        .expect("procedural SOP card distilled");
+    assert!(sop_card.markdown.contains("### Trigger & Symptoms"));
+    assert!(sop_card
+        .markdown
+        .contains("## Standard Operating Procedure"));
+    assert!(sop_card.markdown.contains("### Verification"));
+    assert!(sop_card.markdown.contains("SQLITE_BUSY"));
+
+    // Pitfall card written to /procedural/pitfalls/rewind-*.md.
+    let pitfall_card = report
+        .distilled_cards
+        .iter()
+        .find(|c| c.path.as_str().starts_with("/procedural/pitfalls/rewind-"))
+        .expect("rewind pitfall card distilled");
+    assert!(pitfall_card.markdown.contains("Avoid repeating reverted"));
+
+    // Expired node should be removed from main after merge; raw check confirms deletion.
+    let remaining = vcs
+        .list(&Revision::BranchHead("main".into()), None)
+        .unwrap();
+    assert!(!remaining
+        .iter()
+        .any(|(p, _, _)| *p == vp("/episodic/stale-ttl.md")));
+
+    // Second run with archived/empty new episodes must NOT re-distill the same rewind event (mined = 1).
+    let second = consolidator
+        .consolidate(&ConsolidationRequest::new("main").with_since_ms(1_700_000_006_000))
+        .unwrap();
+    assert_eq!(second.pitfalls_distilled, 0);
+}

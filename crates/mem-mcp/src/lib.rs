@@ -130,6 +130,12 @@ fn dispatch_tool(
             let node = vcs.read(&rev, &path).map_err(|e| e.to_string())?;
             match node {
                 Some(n) => {
+                    if args.get("commit_id").and_then(Value::as_str).is_none() {
+                        if let Some(bid) = n.blob_id {
+                            let _ =
+                                mem_search::record_node_read(vcs.store(), branch, &n.path, &bid);
+                        }
+                    }
                     let text = n.content_str().map_err(|e| e.to_string())?;
                     Ok(serde_json::to_string_pretty(&json!({
                         "path": n.path.as_str(),

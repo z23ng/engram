@@ -1,10 +1,10 @@
 //! Deterministic extraction, deduplication, classification, and Obsidian Markdown
 //! rendering for cold-path episodic consolidation.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use mem_core::{MemoryTier, VirtualPath};
-use mem_search::{parse_wiki_document, EntityTriple, WikiLink};
+use mem_search::{is_linkworthy_anchor, parse_wiki_document, EntityTriple, WikiLink};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SourceEpisode {
@@ -26,11 +26,13 @@ pub(crate) struct BranchAnchor {
     pub path: VirtualPath,
     pub title: String,
     pub aliases: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct DistilledCandidate {
     pub tier: MemoryTier,
+    pub target_dir_override: Option<VirtualPath>,
     pub title: String,
     pub slug: String,
     pub aliases: Vec<String>,
@@ -65,36 +67,18 @@ pub(crate) fn extract_deterministic_cards(episodes: &[SourceEpisode]) -> Vec<Dis
 
         let mut current_heading: Option<String> = None;
         let mut ep_has_statement = false;
+        let mut in_fence = false;
+        let mut pending_stmt: Option<(Option<String>, String)> = None;
 
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("```") {
-                continue;
-            }
-            if let Some(heading) = strip_markdown_heading(trimmed) {
-                if !heading.eq_ignore_ascii_case("related")
-                    && !heading.eq_ignore_ascii_case("references")
-                {
-                    current_heading = Some(heading.to_string());
-                } else {
-                    current_heading = None;
-                }
-                continue;
-            }
-
-            // Skip pure wikilink bullets inside a "## Related" section.
-            if current_heading.is_none() && is_pure_wikilink_bullet(trimmed) {
-                continue;
-            }
-
-            let cleaned = clean_statement_line(trimmed);
+        let mut accept_statement = |heading: Option<&str>, raw_stmt: String| {
+            let cleaned = clean_statement_line(&raw_stmt);
             if cleaned.chars().count() < 8 {
-                continue;
+                return;
             }
 
             let norm = normalize_statement(&cleaned);
             if norm.is_empty() || !exact_seen.insert(norm.clone()) {
-                continue;
+                return;
             }
 
             let tokens = tokenize_for_similarity(&norm);
@@ -102,13 +86,12 @@ pub(crate) fn extract_deterministic_cards(episodes: &[SourceEpisode]) -> Vec<Dis
                 .iter()
                 .any(|existing| jaccard_similarity(existing, &tokens) >= 0.72)
             {
-                continue;
+                return;
             }
             accepted_tokens.push(tokens);
 
-            let tier = classify_statement_tier(&cleaned, ep, current_heading.as_deref());
-            let topic_title = current_heading
-                .as_deref()
+            let tier = classify_statement_tier(&cleaned, ep, heading);
+            let topic_title = heading
                 .filter(|h| !is_generic_heading(h))
                 .unwrap_or(&base_topic)
                 .to_string();
@@ -125,6 +108,62 @@ pub(crate) fn extract_deterministic_cards(episodes: &[SourceEpisode]) -> Vec<Dis
                 importance: ep.importance,
             });
             ep_has_statement = true;
+        };
+
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                if let Some((h, s)) = pending_stmt.take() {
+                    accept_statement(h.as_deref(), s);
+                }
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            if trimmed.is_empty() {
+                if let Some((h, s)) = pending_stmt.take() {
+                    accept_statement(h.as_deref(), s);
+                }
+                continue;
+            }
+            if let Some(heading) = strip_markdown_heading(trimmed) {
+                if let Some((h, s)) = pending_stmt.take() {
+                    accept_statement(h.as_deref(), s);
+                }
+                if !heading.eq_ignore_ascii_case("related")
+                    && !heading.eq_ignore_ascii_case("references")
+                {
+                    current_heading = Some(heading.to_string());
+                } else {
+                    current_heading = None;
+                }
+                continue;
+            }
+
+            // Skip pure wikilink bullets inside a "## Related" section.
+            if current_heading.is_none() && is_pure_wikilink_bullet(trimmed) {
+                continue;
+            }
+
+            let is_indented_cont =
+                (line.starts_with("  ") || line.starts_with('\t')) && !is_list_item_start(trimmed);
+            if is_indented_cont {
+                if let Some((_, ref mut prev)) = pending_stmt {
+                    prev.push(' ');
+                    prev.push_str(trimmed);
+                    continue;
+                }
+            }
+
+            if let Some((h, s)) = pending_stmt.take() {
+                accept_statement(h.as_deref(), s);
+            }
+            pending_stmt = Some((current_heading.clone(), trimmed.to_string()));
+        }
+        if let Some((h, s)) = pending_stmt.take() {
+            accept_statement(h.as_deref(), s);
         }
 
         // Fallback if episode had only short or heading-only content.
@@ -228,9 +267,15 @@ pub(crate) fn extract_deterministic_cards(episodes: &[SourceEpisode]) -> Vec<Dis
             statements.push(item.text);
         }
 
-        let aliases = vec![format!("consolidated-{slug}")];
+        let mut aliases = vec![format!("consolidated-{slug}")];
+        for err_alias in extract_error_aliases(&statements) {
+            if !aliases.iter().any(|a| a.eq_ignore_ascii_case(&err_alias)) {
+                aliases.push(err_alias);
+            }
+        }
         cards.push(DistilledCandidate {
             tier,
+            target_dir_override: None,
             title,
             slug,
             aliases,
@@ -332,7 +377,66 @@ pub(crate) fn render_card_markdown(
         merged_statements.push(stmt.clone());
     }
 
-    // Discover related active notes for [[Wikilink]] weaving.
+    // Canonicalize tags & entity names against existing active branch anchors.
+    let mut canonical_tags_map: HashMap<String, String> = HashMap::new();
+    let mut canonical_entity_map: HashMap<String, String> = HashMap::new();
+    for anchor in anchors {
+        for t in &anchor.tags {
+            canonical_tags_map
+                .entry(t.trim().to_ascii_lowercase())
+                .or_insert_with(|| t.trim().to_string());
+        }
+        let tl = anchor.title.trim().to_ascii_lowercase();
+        if !tl.is_empty() {
+            canonical_entity_map
+                .entry(tl)
+                .or_insert_with(|| anchor.title.trim().to_string());
+        }
+        for al in &anchor.aliases {
+            let al_low = al.trim().to_ascii_lowercase();
+            if !al_low.is_empty() {
+                canonical_entity_map
+                    .entry(al_low)
+                    .or_insert_with(|| anchor.title.trim().to_string());
+            }
+        }
+    }
+    let normalized_tags: BTreeSet<String> = merged_tags
+        .into_iter()
+        .map(|t| {
+            canonical_tags_map
+                .get(&t.trim().to_ascii_lowercase())
+                .cloned()
+                .unwrap_or(t)
+        })
+        .collect();
+    merged_tags = normalized_tags;
+    for ent in &mut merged_entities {
+        if let Some(canon) = canonical_entity_map.get(&ent.source.trim().to_ascii_lowercase()) {
+            ent.source = canon.clone();
+        }
+        if let Some(canon) = canonical_entity_map.get(&ent.target.trim().to_ascii_lowercase()) {
+            ent.target = canon.clone();
+        }
+    }
+
+    // Discover related active notes for [[Wikilink]] weaving with IDF/anti-hub filtering.
+    let total_docs = anchors.len();
+    let mut term_df: HashMap<String, usize> = HashMap::new();
+    for anchor in anchors {
+        let mut seen = HashSet::new();
+        let tl = anchor.title.trim().to_ascii_lowercase();
+        if !tl.is_empty() && seen.insert(tl.clone()) {
+            *term_df.entry(tl).or_insert(0) += 1;
+        }
+        for al in &anchor.aliases {
+            let all = al.trim().to_ascii_lowercase();
+            if !all.is_empty() && seen.insert(all.clone()) {
+                *term_df.entry(all).or_insert(0) += 1;
+            }
+        }
+    }
+
     let combined_text = format!("{} {}", candidate.title, merged_statements.join("\n"));
     let combined_lower = combined_text.to_ascii_lowercase();
     let mut linked_titles: Vec<String> = Vec::new();
@@ -345,14 +449,20 @@ pub(crate) fn render_card_markdown(
             continue;
         }
         let anchor_lower = anchor.title.to_ascii_lowercase();
+        let t_df = term_df.get(&anchor_lower).copied().unwrap_or(1);
         let mut matched = false;
-        if anchor.title.chars().count() >= 2 && contains_term(&combined_lower, &anchor_lower) {
+        if is_linkworthy_anchor(&anchor.title, t_df, total_docs)
+            && contains_term(&combined_lower, &anchor_lower)
+        {
             weave_pairs.push((anchor.title.clone(), anchor.title.clone()));
             matched = true;
         }
         for alias in &anchor.aliases {
             let alias_lower = alias.to_ascii_lowercase();
-            if alias.chars().count() >= 2 && contains_term(&combined_lower, &alias_lower) {
+            let a_df = term_df.get(&alias_lower).copied().unwrap_or(1);
+            if is_linkworthy_anchor(alias, a_df, total_docs)
+                && contains_term(&combined_lower, &alias_lower)
+            {
                 weave_pairs.push((alias.clone(), anchor.title.clone()));
                 matched = true;
             }
@@ -395,19 +505,49 @@ pub(crate) fn render_card_markdown(
     out.push_str("---\n\n");
     out.push_str(&format!("# {}\n\n", candidate.title));
 
-    let section_title = if candidate.tier == MemoryTier::Procedural {
-        "## Standard Operating Procedure"
-    } else {
-        "## Distilled Facts & Decisions"
-    };
-    out.push_str(section_title);
-    out.push_str("\n\n");
-
-    for (idx, stmt) in merged_statements.iter().enumerate() {
-        let woven = weave_line_wikilinks(stmt, &weave_pairs);
-        if candidate.tier == MemoryTier::Procedural {
-            out.push_str(&format!("{}. {}\n", idx + 1, woven));
+    if candidate.tier == MemoryTier::Procedural {
+        let mut triggers = Vec::new();
+        let mut steps = Vec::new();
+        let mut verifications = Vec::new();
+        for stmt in &merged_statements {
+            match classify_procedural_role(stmt) {
+                ProceduralRole::Trigger => triggers.push(stmt.as_str()),
+                ProceduralRole::Verification => verifications.push(stmt.as_str()),
+                ProceduralRole::Step => steps.push(stmt.as_str()),
+            }
+        }
+        if steps.is_empty() {
+            out.push_str("## Standard Operating Procedure\n\n");
+            for (idx, stmt) in merged_statements.iter().enumerate() {
+                let woven = weave_line_wikilinks(stmt, &weave_pairs);
+                out.push_str(&format!("{}. {}\n", idx + 1, woven));
+            }
         } else {
+            if !triggers.is_empty() {
+                out.push_str("### Trigger & Symptoms\n\n");
+                for trig in &triggers {
+                    let woven = weave_line_wikilinks(trig, &weave_pairs);
+                    out.push_str(&format!("- {woven}\n"));
+                }
+                out.push('\n');
+            }
+            out.push_str("## Standard Operating Procedure\n\n");
+            for (idx, stmt) in steps.iter().enumerate() {
+                let woven = weave_line_wikilinks(stmt, &weave_pairs);
+                out.push_str(&format!("{}. {}\n", idx + 1, woven));
+            }
+            if !verifications.is_empty() {
+                out.push_str("\n### Verification\n\n");
+                for ver in &verifications {
+                    let woven = weave_line_wikilinks(ver, &weave_pairs);
+                    out.push_str(&format!("- {woven}\n"));
+                }
+            }
+        }
+    } else {
+        out.push_str("## Distilled Facts & Decisions\n\n");
+        for stmt in &merged_statements {
+            let woven = weave_line_wikilinks(stmt, &weave_pairs);
             out.push_str(&format!("- {}\n", woven));
         }
     }
@@ -427,6 +567,107 @@ pub(crate) fn render_card_markdown(
     }
 
     (out, linked_titles, matched_paths)
+}
+
+enum ProceduralRole {
+    Trigger,
+    Step,
+    Verification,
+}
+
+fn classify_procedural_role(stmt: &str) -> ProceduralRole {
+    let lower = stmt.to_ascii_lowercase();
+    let starts_step = [
+        "sop:",
+        "step ",
+        "step:",
+        "runbook:",
+        "fix:",
+        "set ",
+        "run ",
+        "execute ",
+        "configure ",
+        "always ",
+        "pragma ",
+    ]
+    .iter()
+    .any(|kw| lower.starts_with(kw));
+    if starts_step {
+        return ProceduralRole::Step;
+    }
+
+    if [
+        "verify ",
+        "confirm ",
+        "assert ",
+        "validate ",
+        "verification:",
+        "验证",
+        "确认",
+        "测试",
+    ]
+    .iter()
+    .any(|kw| lower.starts_with(kw))
+        || lower.contains("to verify")
+        || lower.contains("verify that")
+    {
+        return ProceduralRole::Verification;
+    }
+
+    if [
+        "symptom",
+        "triggered",
+        "when ",
+        "timed out",
+        "timeout",
+        "error:",
+        "error ",
+        "failed with",
+        "http 429",
+        "http 500",
+        "http 503",
+        "报错",
+        "异常",
+        "触发",
+        "失败时",
+        "超时",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
+    {
+        return ProceduralRole::Trigger;
+    }
+
+    ProceduralRole::Step
+}
+
+fn extract_error_aliases(statements: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for stmt in statements {
+        for raw in stmt.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            if raw.len() >= 5
+                && raw.contains('_')
+                && raw
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                && raw.chars().filter(|c| c.is_ascii_uppercase()).count() >= 2
+                && seen.insert(raw.to_string())
+            {
+                out.push(raw.to_string());
+            }
+        }
+        let lower = stmt.to_ascii_lowercase();
+        for code in ["429", "500", "502", "503", "504"] {
+            if lower.contains(&format!("http {code}")) || lower.contains(&format!("{code} ")) {
+                let alias = format!("HTTP {code}");
+                if seen.insert(alias.clone()) {
+                    out.push(alias);
+                }
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn slugify(raw: &str) -> String {
@@ -557,6 +798,18 @@ fn is_generic_heading(heading: &str) -> bool {
 fn is_pure_wikilink_bullet(line: &str) -> bool {
     let inner = line.trim_start_matches(['-', '*', ' ']).trim();
     inner.starts_with("[[") && inner.ends_with("]]")
+}
+
+fn is_list_item_start(trimmed: &str) -> bool {
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("> ") {
+        return true;
+    }
+    if let Some(idx) = trimmed.find(['.', ')']) {
+        if idx > 0 && idx <= 3 && trimmed[..idx].chars().all(|c| c.is_ascii_digit()) {
+            return trimmed[idx + 1..].starts_with(' ');
+        }
+    }
+    false
 }
 
 fn clean_statement_line(line: &str) -> String {

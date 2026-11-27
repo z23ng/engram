@@ -107,7 +107,7 @@ pub fn parse_wiki_document(
             }
             continue;
         }
-        if let Some(marker) = opening_fence(trimmed) {
+        if let Some((marker, _)) = opening_fence(trimmed) {
             fence_marker = Some(marker);
             continue;
         }
@@ -354,14 +354,22 @@ fn parse_entities(title: &str, raw_entities: &[String]) -> Vec<EntityTriple> {
     out
 }
 
-fn opening_fence(trimmed_line: &str) -> Option<char> {
+fn opening_fence(trimmed_line: &str) -> Option<(char, String)> {
     if trimmed_line.starts_with("```") {
-        Some('`')
+        Some(('`', trimmed_line.to_string()))
     } else if trimmed_line.starts_with("~~~") {
-        Some('~')
+        Some(('~', trimmed_line.to_string()))
     } else {
         None
     }
+}
+
+fn is_table_separator(trimmed_line: &str) -> bool {
+    trimmed_line.starts_with('|')
+        && trimmed_line.contains("---")
+        && trimmed_line
+            .chars()
+            .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
 }
 
 fn is_closing_fence(trimmed_line: &str, marker: char) -> bool {
@@ -539,7 +547,7 @@ pub fn extract_markdown_links_from_markdown(markdown: &str) -> Vec<WikiLink> {
             }
             continue;
         }
-        if let Some(marker) = opening_fence(trimmed) {
+        if let Some((marker, _)) = opening_fence(trimmed) {
             fence_marker = Some(marker);
             continue;
         }
@@ -634,7 +642,9 @@ fn build_breadcrumb_chunks(
     let mut current_heading_path = "(root)".to_string();
     let mut buf: Vec<(usize, &str)> = Vec::new();
     let mut buf_chars = 0usize;
-    let mut fence_marker: Option<char> = None;
+    let mut fence_info: Option<(char, String)> = None;
+    let mut pending_prefix: Option<String> = None;
+    let mut active_table_header: Option<(String, String)> = None;
 
     let aliases_str = if aliases.is_empty() {
         "none".to_string()
@@ -650,16 +660,31 @@ fn build_breadcrumb_chunks(
     let flush = |chunks: &mut Vec<WikiChunk>,
                  buf: &mut Vec<(usize, &str)>,
                  buf_chars: &mut usize,
-                 heading_path: &str| {
+                 heading_path: &str,
+                 prefix: Option<&str>,
+                 suffix: Option<&str>| {
         if buf.is_empty() {
             return;
         }
-        let raw_snippet: String = buf
+        let body_joined: String = buf
             .iter()
             .map(|(_, line)| *line)
             .collect::<Vec<_>>()
             .join("\n");
-        if raw_snippet.trim().is_empty() {
+        let mut raw_snippet = String::new();
+        if let Some(pref) = prefix {
+            raw_snippet.push_str(pref);
+            raw_snippet.push('\n');
+        }
+        raw_snippet.push_str(&body_joined);
+        if let Some(suf) = suffix {
+            if !raw_snippet.ends_with('\n') {
+                raw_snippet.push('\n');
+            }
+            raw_snippet.push_str(suf);
+        }
+
+        if raw_snippet.trim().is_empty() || !raw_snippet.chars().any(|c| c.is_alphanumeric()) {
             buf.clear();
             *buf_chars = 0;
             return;
@@ -687,30 +712,74 @@ fn build_breadcrumb_chunks(
         let line_no = body_start_idx + offset + 1;
         let trimmed = line.trim_start();
 
-        if let Some(marker) = fence_marker {
+        if let Some((marker, ref open_line)) = fence_info.clone() {
             if is_closing_fence(trimmed, marker) {
-                fence_marker = None;
+                fence_info = None;
+                if buf_chars + line.len() + 1 > max_chunk_chars && !buf.is_empty() {
+                    let close_fence = if marker == '`' { "```" } else { "~~~" };
+                    let pref = pending_prefix.take();
+                    flush(
+                        &mut chunks,
+                        &mut buf,
+                        &mut buf_chars,
+                        &current_heading_path,
+                        pref.as_deref(),
+                        Some(close_fence),
+                    );
+                    pending_prefix = Some(open_line.clone());
+                }
+                buf_chars += line.len() + 1;
+                buf.push((line_no, line));
+                continue;
             }
             if buf_chars + line.len() + 1 > max_chunk_chars && !buf.is_empty() {
-                flush(&mut chunks, &mut buf, &mut buf_chars, &current_heading_path);
+                let close_fence = if marker == '`' { "```" } else { "~~~" };
+                let pref = pending_prefix.take();
+                flush(
+                    &mut chunks,
+                    &mut buf,
+                    &mut buf_chars,
+                    &current_heading_path,
+                    pref.as_deref(),
+                    Some(close_fence),
+                );
+                pending_prefix = Some(open_line.clone());
             }
             buf_chars += line.len() + 1;
             buf.push((line_no, line));
             continue;
         }
 
-        if let Some(marker) = opening_fence(trimmed) {
-            fence_marker = Some(marker);
+        if let Some((marker, open_line)) = opening_fence(trimmed) {
+            active_table_header = None;
             if buf_chars + line.len() + 1 > max_chunk_chars && !buf.is_empty() {
-                flush(&mut chunks, &mut buf, &mut buf_chars, &current_heading_path);
+                let pref = pending_prefix.take();
+                flush(
+                    &mut chunks,
+                    &mut buf,
+                    &mut buf_chars,
+                    &current_heading_path,
+                    pref.as_deref(),
+                    None,
+                );
             }
+            fence_info = Some((marker, open_line));
             buf_chars += line.len() + 1;
             buf.push((line_no, line));
             continue;
         }
 
         if let Some((level, heading_text)) = parse_atx_heading(trimmed) {
-            flush(&mut chunks, &mut buf, &mut buf_chars, &current_heading_path);
+            active_table_header = None;
+            let pref = pending_prefix.take();
+            flush(
+                &mut chunks,
+                &mut buf,
+                &mut buf_chars,
+                &current_heading_path,
+                pref.as_deref(),
+                None,
+            );
             while let Some((top_level, _)) = heading_stack.last() {
                 if *top_level >= level {
                     heading_stack.pop();
@@ -731,14 +800,47 @@ fn build_breadcrumb_chunks(
             continue;
         }
 
+        if trimmed.starts_with('|') {
+            if is_table_separator(trimmed) {
+                if let Some((_, prev_line)) = buf.last() {
+                    if prev_line.trim_start().starts_with('|') {
+                        active_table_header = Some(((*prev_line).to_string(), line.to_string()));
+                    }
+                }
+            }
+        } else {
+            active_table_header = None;
+        }
+
         if buf_chars + line.len() + 1 > max_chunk_chars && !buf.is_empty() {
-            flush(&mut chunks, &mut buf, &mut buf_chars, &current_heading_path);
+            let pref = pending_prefix.take();
+            flush(
+                &mut chunks,
+                &mut buf,
+                &mut buf_chars,
+                &current_heading_path,
+                pref.as_deref(),
+                None,
+            );
+            if trimmed.starts_with('|') {
+                if let Some((ref h, ref s)) = active_table_header {
+                    pending_prefix = Some(format!("{h}\n{s}"));
+                }
+            }
         }
         buf_chars += line.len() + 1;
         buf.push((line_no, line));
     }
 
-    flush(&mut chunks, &mut buf, &mut buf_chars, &current_heading_path);
+    let pref = pending_prefix.take();
+    flush(
+        &mut chunks,
+        &mut buf,
+        &mut buf_chars,
+        &current_heading_path,
+        pref.as_deref(),
+        None,
+    );
 
     if chunks.is_empty() {
         let heading_path = "(frontmatter)".to_string();

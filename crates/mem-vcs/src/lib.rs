@@ -27,8 +27,9 @@ use crate::merge::merge_branches;
 use crate::tree::{
     apply_workspace_overlay, build_merkle_tree, flatten_subtree_at, flatten_tree,
     flatten_tree_under, lookup_in_tree, parse_metadata, resolve_commit_tree_id,
-    resolve_effective_tree,
+    resolve_effective_tree, revision_reference_time_ms,
 };
+use rusqlite::params;
 
 /// Core version control operations on a structured memory repository.
 pub trait VersionControlEngine: Send + Sync {
@@ -162,11 +163,14 @@ impl MemVcs {
         prefix: Option<&VirtualPath>,
     ) -> Result<Vec<(VirtualPath, BlobId, MemoryMetadata)>> {
         self.store.with_conn(|conn| {
+            let ref_ms = revision_reference_time_ms(conn, rev)?;
             let flat = resolve_effective_tree(conn, rev, prefix)?;
             let mut result = Vec::with_capacity(flat.len());
             for (path, (blob_id, meta_json)) in flat {
                 let metadata = parse_metadata(&meta_json)?;
-                result.push((path, blob_id, metadata));
+                if !metadata.is_expired_at(ref_ms) {
+                    result.push((path, blob_id, metadata));
+                }
             }
             Ok(result)
         })
@@ -217,6 +221,11 @@ impl MemVcs {
                 return Err(MemError::BranchNotFound(branch.to_string()));
             }
             workspace_clear_conn(tx, branch)?;
+            tx.execute(
+                "DELETE FROM memory_telemetry WHERE branch = ?1",
+                params![branch],
+            )
+            .map_err(|e| MemError::Storage(format!("failed to clear branch telemetry: {e}")))?;
             Ok(())
         })
     }
@@ -298,9 +307,13 @@ impl VersionControlEngine for MemVcs {
             let Some((blob_id, meta_json)) = entry else {
                 return Ok(None);
             };
+            let metadata = parse_metadata(&meta_json)?;
+            let ref_ms = revision_reference_time_ms(conn, rev)?;
+            if metadata.is_expired_at(ref_ms) {
+                return Ok(None);
+            }
             let (content, _content_type) = get_blob_conn(conn, &blob_id)?
                 .ok_or_else(|| MemError::BlobNotFound(blob_id.to_hex()))?;
-            let metadata = parse_metadata(&meta_json)?;
 
             Ok(Some(MemoryNode {
                 path: path.clone(),
@@ -327,16 +340,18 @@ impl VersionControlEngine for MemVcs {
                 build_merkle_tree(tx, &flat)?
             };
 
-            let commit_id = put_commit_conn(
-                tx,
-                &new_tree_id,
-                &[head_id],
-                author,
-                message,
-                Utc::now().timestamp_millis(),
-            )?;
+            let now_ms = Utc::now().timestamp_millis();
+            let commit_id = put_commit_conn(tx, &new_tree_id, &[head_id], author, message, now_ms)?;
             set_ref_conn(tx, branch, &commit_id)?;
             workspace_clear_conn(tx, branch)?;
+            let window_start = now_ms.saturating_sub(3_600_000);
+            tx.execute(
+                "UPDATE memory_telemetry
+                 SET post_hit_commits = post_hit_commits + 1
+                 WHERE branch = ?1 AND last_accessed_ms >= ?2",
+                params![branch, window_start],
+            )
+            .map_err(|e| MemError::Storage(format!("failed to update commit telemetry: {e}")))?;
             Ok(commit_id)
         })
     }
@@ -371,11 +386,27 @@ impl VersionControlEngine for MemVcs {
 
     fn rewind(&self, branch: &str, target: &CommitId) -> Result<()> {
         self.store.with_tx(|tx| {
-            if get_ref_conn(tx, branch)?.is_none() {
-                return Err(MemError::BranchNotFound(branch.to_string()));
-            }
+            let old_head = get_ref_conn(tx, branch)?
+                .ok_or_else(|| MemError::BranchNotFound(branch.to_string()))?;
             if get_commit_conn(tx, target)?.is_none() {
                 return Err(MemError::CommitNotFound(target.to_hex()));
+            }
+            let now_ms = Utc::now().timestamp_millis();
+            if old_head != *target {
+                tx.execute(
+                    "INSERT INTO rewind_events (branch, abandoned_commit_id, target_commit_id, created_at_ms, mined)
+                     VALUES (?1, ?2, ?3, ?4, 0)",
+                    params![branch, old_head.to_hex(), target.to_hex(), now_ms],
+                )
+                .map_err(|e| MemError::Storage(format!("failed to record rewind event: {e}")))?;
+                let window_start = now_ms.saturating_sub(3_600_000);
+                tx.execute(
+                    "UPDATE memory_telemetry
+                     SET post_hit_rewinds = post_hit_rewinds + 1
+                     WHERE branch = ?1 AND last_accessed_ms >= ?2",
+                    params![branch, window_start],
+                )
+                .map_err(|e| MemError::Storage(format!("failed to update rewind telemetry: {e}")))?;
             }
             set_ref_conn(tx, branch, target)?;
             workspace_clear_conn(tx, branch)?;

@@ -212,6 +212,7 @@ fn build_candidate_from_spec(
 
     Some(DistilledCandidate {
         tier,
+        target_dir_override: None,
         title,
         slug,
         aliases: spec.aliases,

@@ -86,19 +86,31 @@ pub fn compile_core(
     let mut used_tokens = wrapper_tokens;
 
     for (path, blob_id, meta) in entries {
-        let content = payloads.get(&blob_id).map(String::as_str).unwrap_or("");
-        let section = format!(
-            "## {} (importance: {:.2})\n{}\n\n",
+        let raw_content = payloads.get(&blob_id).map(String::as_str).unwrap_or("");
+        let cleaned = clean_core_payload(raw_content);
+        let header = format!(
+            "## {} (importance: {:.2})\n",
             path.as_str(),
-            meta.importance,
-            content.trim_end()
+            meta.importance
         );
+        let section = format!("{header}{}\n\n", cleaned.trim_end());
         let section_tokens = estimate_tokens(&section);
 
         if used_tokens + section_tokens <= max_tokens {
             body.push_str(&section);
             used_tokens += section_tokens;
             included_paths.push(path);
+        } else if let Some(partial) =
+            fit_partial_sections(&header, &cleaned, max_tokens.saturating_sub(used_tokens))
+        {
+            let partial_tokens = estimate_tokens(&partial);
+            if used_tokens + partial_tokens <= max_tokens {
+                body.push_str(&partial);
+                used_tokens += partial_tokens;
+                included_paths.push(path);
+            } else {
+                skipped_paths.push(path);
+            }
         } else {
             skipped_paths.push(path);
         }
@@ -116,4 +128,93 @@ pub fn compile_core(
         skipped_paths,
         estimated_tokens,
     })
+}
+
+/// Strips leading YAML frontmatter and excessive blank lines so `/core` injects pure rules/goals.
+fn clean_core_payload(raw: &str) -> String {
+    let normalized = raw
+        .strip_prefix('\u{feff}')
+        .unwrap_or(raw)
+        .replace("\r\n", "\n");
+    let lines: Vec<&str> = normalized.lines().collect();
+    let body_start = if lines.first().is_some_and(|l| l.trim() == "---") {
+        lines
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(idx, l)| {
+                let t = l.trim();
+                (t == "---" || t == "...").then_some(idx + 1)
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut out = String::new();
+    let mut blank_run = 0usize;
+    for line in &lines[body_start..] {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 && !out.is_empty() {
+                out.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Fits leading `## ` / `### ` subsections when a `/core` file exceeds the remaining budget.
+fn fit_partial_sections(header: &str, body: &str, budget_tokens: usize) -> Option<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let is_sub = trimmed.starts_with("## ") || trimmed.starts_with("### ");
+        if is_sub && !current.trim().is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        blocks.push(current);
+    }
+    if blocks.len() <= 1 {
+        return None;
+    }
+
+    let mut assembled = String::new();
+    let mut included_blocks = 0usize;
+    for block in blocks {
+        let candidate_body = if assembled.is_empty() {
+            block.clone()
+        } else {
+            format!("{assembled}\n\n{block}")
+        };
+        let candidate = format!("{header}{}\n...(truncated)\n\n", candidate_body.trim_end());
+        if estimate_tokens(&candidate) <= budget_tokens {
+            assembled = candidate_body;
+            included_blocks += 1;
+        } else {
+            break;
+        }
+    }
+
+    if included_blocks == 0 {
+        None
+    } else {
+        Some(format!(
+            "{header}{}\n...(truncated)\n\n",
+            assembled.trim_end()
+        ))
+    }
 }

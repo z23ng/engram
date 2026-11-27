@@ -2163,7 +2163,16 @@ fn cmd_doctor(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
         SqliteStore::open_in_memory()
     };
 
-    let (sqlite_ok, fts5_ok, links_ok, core_ms) = match store_res {
+    let (
+        sqlite_ok,
+        fts5_ok,
+        links_ok,
+        core_ms,
+        quantized_chunks,
+        expired_nodes,
+        dangling_wikilinks,
+        promotion_candidates,
+    ) = match store_res {
         Ok(store) => {
             let wal_check = store.with_conn(|c| {
                 let fts: i64 = c
@@ -2172,19 +2181,49 @@ fn cmd_doctor(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
                 let links: i64 = c
                     .query_row("SELECT COUNT(*) FROM blob_links", [], |r| r.get(0))
                     .map_err(|e| MemError::Storage(e.to_string()))?;
-                Ok((fts >= 0, links >= 0))
+                let bq: i64 = c
+                    .query_row(
+                        "SELECT COUNT(*) FROM chunk_index WHERE embedding_bq IS NOT NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| MemError::Storage(e.to_string()))?;
+                Ok((fts >= 0, links >= 0, u64::try_from(bq.max(0)).unwrap_or(0)))
             });
             let vcs = MemVcs::new(store);
             let _ = vcs.init();
             let t0 = Instant::now();
             let compile_ok = compile_core(&vcs, &Revision::BranchHead("main".into()), 2000).is_ok();
             let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let (expired, dangling, promos) = if db_exists {
+                let eng = MemSearchEngine::new_bm25_only(vcs.clone());
+                if let Ok(rep) = mem_search::mine_branch(&eng, "main") {
+                    (
+                        rep.expired_paths.len(),
+                        rep.dangling_links.len(),
+                        rep.promotion_candidates.len(),
+                    )
+                } else {
+                    (0, 0, 0)
+                }
+            } else {
+                (0, 0, 0)
+            };
             match wal_check {
-                Ok((f, l)) => (true, f, l, if compile_ok { Some(elapsed_ms) } else { None }),
-                Err(_) => (true, false, false, None),
+                Ok((f, l, bq)) => (
+                    true,
+                    f,
+                    l,
+                    if compile_ok { Some(elapsed_ms) } else { None },
+                    bq,
+                    expired,
+                    dangling,
+                    promos,
+                ),
+                Err(_) => (true, false, false, None, 0, 0, 0, 0),
             }
         }
-        Err(_) => (false, false, false, None),
+        Err(_) => (false, false, false, None, 0, 0, 0, 0),
     };
 
     let (provider_status, provider_detail) = match emb_cfg.backend {
@@ -2245,6 +2284,10 @@ fn cmd_doctor(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
                 "core_compile_ms": core_ms,
                 "provider_status": provider_status,
                 "provider_detail": provider_detail,
+                "quantized_chunks": quantized_chunks,
+                "expired_nodes": expired_nodes,
+                "dangling_wikilinks": dangling_wikilinks,
+                "promotion_candidates": promotion_candidates,
             }))
             .unwrap()
         );
@@ -2265,14 +2308,19 @@ fn cmd_doctor(opts: &GlobalOpts) -> std::result::Result<ExitCode, String> {
             }
         );
         println!(
-            "  [{}] FTS5 + Graph  : fts_chunks={}, blob_links={}",
+            "  [{}] FTS5 + Graph  : fts_chunks={}, blob_links={}, quantized_chunks={}",
             if fts5_ok && links_ok {
                 paint(opts.use_color, "32", "PASS")
             } else {
                 paint(opts.use_color, "31", "FAIL")
             },
             fts5_ok,
-            links_ok
+            links_ok,
+            quantized_chunks
+        );
+        println!(
+            "  [INFO] Mining Health : expired_nodes={}, dangling_wikilinks={}, promotion_candidates={}",
+            expired_nodes, dangling_wikilinks, promotion_candidates
         );
         println!(
             "  [{}] Provider      : {}",

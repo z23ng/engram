@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use chrono::Utc;
 use mem_core::{
     BlobId, CommitId, MemError, MemoryMetadata, Result, Revision, TreeEntry, TreeEntryType, TreeId,
     VirtualPath,
@@ -36,6 +37,19 @@ pub fn resolve_commit_tree_id(conn: &Connection, rev: &Revision) -> Result<TreeI
     let commit = get_commit_conn(conn, &commit_id)?
         .ok_or_else(|| MemError::CommitNotFound(commit_id.to_hex()))?;
     Ok(commit.tree_id)
+}
+
+/// Returns the deterministic evaluation timestamp in Unix milliseconds for TTL checks on `rev`.
+/// Historical [`Revision::Commit`] snapshots evaluate against the commit's timestamp.
+pub fn revision_reference_time_ms(conn: &Connection, rev: &Revision) -> Result<i64> {
+    match rev {
+        Revision::Commit(commit_id) => {
+            let commit = get_commit_conn(conn, commit_id)?
+                .ok_or_else(|| MemError::CommitNotFound(commit_id.to_hex()))?;
+            Ok(commit.created_at_ms)
+        }
+        Revision::BranchWorkspace(_) | Revision::BranchHead(_) => Ok(Utc::now().timestamp_millis()),
+    }
 }
 
 /// Looks up a single file path inside `root_tree_id` in $O(\text{depth})$ queries.

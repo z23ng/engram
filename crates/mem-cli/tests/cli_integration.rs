@@ -81,6 +81,10 @@ fn cli_full_workflow_and_doctor() {
     assert_eq!(doctor["sqlite_ok"], true);
     assert_eq!(doctor["fts5_ok"], true);
     assert_eq!(doctor["wiki_graph_ok"], true);
+    assert!(doctor["quantized_chunks"].as_u64().is_some());
+    assert!(doctor["expired_nodes"].as_u64().is_some());
+    assert!(doctor["dangling_wikilinks"].as_u64().is_some());
+    assert!(doctor["promotion_candidates"].as_u64().is_some());
 
     run(&["rewind", &c0]);
     let after_rewind = run(&["ls"]).as_array().unwrap().clone();

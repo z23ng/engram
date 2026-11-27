@@ -2,23 +2,36 @@
 
 use std::cmp::Ordering;
 use std::collections::btree_map::Entry as BTreeEntry;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use mem_core::{BlobId, MemError, MemoryMetadata, Result, Revision, VirtualPath};
+use mem_core::{
+    BlobId, MemError, MemoryMetadata, MemoryTier, Result, Revision, TreeId, VirtualPath,
+};
 use mem_store::cas::get_blob_conn;
+use mem_store::workspace_list_conn;
+use mem_vcs::tree::{
+    apply_workspace_overlay, flatten_tree_under, parse_metadata, resolve_commit_tree_id,
+    revision_reference_time_ms,
+};
 use mem_vcs::MemVcs;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler::{compile_core, CompiledCoreContext};
 use crate::config::{ConsolidateLlmConfig, SearchConfig};
-use crate::embedder::DISABLED_MODEL;
 use crate::embedder::{
-    cosine_similarity_le_bytes, encode_f32_vec, EmbeddingProvider, NoopEmbedder,
+    bq_hamming_distance_words, cosine_similarity_le_bytes, decode_bq_words, dot_product_le_bytes,
+    encode_bq_vec, encode_f32_vec, normalize_vec, EmbeddingProvider, NoopEmbedder, DISABLED_MODEL,
 };
 use crate::ingest::{ingest_knowledge, IngestOutcome, IngestRequest};
+use crate::mining::mine_commit_history;
+use crate::sanitize::compute_simhash64;
+use crate::telemetry::{
+    load_branch_telemetry, record_search_hits, utility_multiplier, TelemetryRow,
+};
 use crate::vault::{export_vault, import_vault, sync_vault, VaultExportStats, VaultImportStats};
 use crate::wiki::{extract_markdown_links_from_markdown, parse_wiki_document, ParsedWikiDocument};
 
@@ -26,6 +39,196 @@ use crate::wiki::{extract_markdown_links_from_markdown, parse_wiki_document, Par
 const EMBED_GROUP_CHUNKS: usize = 128;
 /// Blobs indexed by another model that one search re-embeds; the rest wait for later calls.
 const STALE_PER_PASS: usize = 32;
+const SNAPSHOT_CACHE_CAPACITY: usize = 16;
+const QUERY_VEC_CACHE_CAPACITY: usize = 256;
+
+#[derive(Debug)]
+struct LruInner<K, V> {
+    cap: usize,
+    map: HashMap<K, V>,
+    order: VecDeque<K>,
+}
+
+#[derive(Debug)]
+struct LruCache<K, V> {
+    inner: Mutex<LruInner<K, V>>,
+}
+
+impl<K, V> LruCache<K, V>
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+{
+    fn new(cap: usize) -> Self {
+        Self {
+            inner: Mutex::new(LruInner {
+                cap: cap.max(1),
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            }),
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<V> {
+        let mut guard = self.inner.lock().ok()?;
+        let val = guard.map.get(key)?.clone();
+        guard.order.retain(|k| k != key);
+        guard.order.push_back(key.clone());
+        Some(val)
+    }
+
+    fn insert(&self, key: K, val: V) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        if guard.map.contains_key(&key) {
+            guard.map.insert(key.clone(), val);
+            guard.order.retain(|k| k != &key);
+            guard.order.push_back(key);
+            return;
+        }
+        while guard.map.len() >= guard.cap {
+            let Some(evict) = guard.order.pop_front() else {
+                break;
+            };
+            guard.map.remove(&evict);
+        }
+        guard.order.push_back(key.clone());
+        guard.map.insert(key, val);
+    }
+
+    fn clear(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.map.clear();
+            guard.order.clear();
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SnapshotKey {
+    root_tree_id: TreeId,
+    ws_hash: [u8; 32],
+}
+
+#[derive(Clone)]
+struct CachedResolvedGraph {
+    outlinks_map: HashMap<VirtualPath, BTreeSet<VirtualPath>>,
+    backlinks_map: HashMap<VirtualPath, BTreeSet<VirtualPath>>,
+    entity_nodes: HashMap<String, BTreeSet<VirtualPath>>,
+    out_degrees: HashMap<VirtualPath, usize>,
+    in_degrees: HashMap<VirtualPath, usize>,
+}
+
+struct CachedGraphData {
+    active_sig: u64,
+    headers: HashMap<BlobId, ActiveBlobHeader>,
+    links: Vec<ActiveLinkRow>,
+    full_graph: CachedResolvedGraph,
+}
+
+#[derive(Clone)]
+struct CachedChunkVector {
+    blob_id: BlobId,
+    chunk_seq: usize,
+    f32_bytes: Vec<u8>,
+    bq_words: Vec<u64>,
+}
+
+type CoChangeAdjacency = HashMap<VirtualPath, Vec<(VirtualPath, f32)>>;
+
+struct CachedVectorIndex {
+    active_sig: u64,
+    model: String,
+    global_count: u64,
+    chunks: Vec<CachedChunkVector>,
+}
+
+struct BranchSearchSnapshot {
+    raw_entries: Vec<(VirtualPath, BlobId, MemoryMetadata)>,
+    has_any_ttl: bool,
+    verified_scopes: Mutex<HashMap<(Option<String>, String), u64>>,
+    cached_graph: Mutex<Option<Arc<CachedGraphData>>>,
+    cached_branch_graph: Mutex<Option<(u64, Arc<BranchGraph>)>>,
+    cached_vecs: Mutex<Option<Arc<CachedVectorIndex>>>,
+    cached_cochanges: Mutex<Option<Arc<CoChangeAdjacency>>>,
+}
+
+impl BranchSearchSnapshot {
+    fn active_entries(
+        &self,
+        prefix: Option<&VirtualPath>,
+        ref_ms: i64,
+    ) -> Vec<(VirtualPath, BlobId, MemoryMetadata)> {
+        self.raw_entries
+            .iter()
+            .filter(|(p, _, m)| {
+                (!self.has_any_ttl || !m.is_expired_at(ref_ms))
+                    && prefix.is_none_or(|pref| p.starts_with(pref))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn active_signature(&self, ref_ms: i64) -> u64 {
+        if !self.has_any_ttl {
+            return self.raw_entries.len() as u64;
+        }
+        let mut h = blake3::Hasher::new();
+        let mut count = 0u64;
+        for (p, b, m) in &self.raw_entries {
+            if !m.is_expired_at(ref_ms) {
+                count += 1;
+                h.update(p.as_str().as_bytes());
+                h.update(b.as_bytes());
+            }
+        }
+        h.update(&count.to_le_bytes());
+        let bytes = h.finalize();
+        u64::from_le_bytes(bytes.as_bytes()[..8].try_into().unwrap_or([0u8; 8]))
+    }
+
+    fn is_scope_verified(
+        &self,
+        prefix: Option<&VirtualPath>,
+        model: &str,
+        global_count: u64,
+    ) -> bool {
+        let Ok(guard) = self.verified_scopes.lock() else {
+            return false;
+        };
+        if guard.get(&(None, model.to_string())).copied() == Some(global_count) {
+            return true;
+        }
+        if let Some(pref) = prefix {
+            let key = (Some(pref.as_str().to_string()), model.to_string());
+            return guard.get(&key).copied() == Some(global_count);
+        }
+        false
+    }
+
+    fn mark_scope_verified(&self, prefix: Option<&VirtualPath>, model: &str, global_count: u64) {
+        if let Ok(mut guard) = self.verified_scopes.lock() {
+            let key = (prefix.map(|p| p.as_str().to_string()), model.to_string());
+            guard.insert(key, global_count);
+        }
+    }
+
+    fn invalidate_graph_caches(&self) {
+        if let Ok(mut g) = self.cached_graph.lock() {
+            *g = None;
+        }
+        if let Ok(mut bg) = self.cached_branch_graph.lock() {
+            *bg = None;
+        }
+        if let Ok(mut v) = self.cached_vecs.lock() {
+            *v = None;
+        }
+        if let Ok(mut c) = self.cached_cochanges.lock() {
+            *c = None;
+        }
+    }
+}
 
 /// Query parameters for branch-isolated hybrid search.
 #[derive(Debug, Clone)]
@@ -166,6 +369,8 @@ pub struct MemSearchEngine {
     embedder: Arc<dyn EmbeddingProvider>,
     config: SearchConfig,
     total_embedding_calls: Arc<AtomicUsize>,
+    snapshot_cache: Arc<LruCache<SnapshotKey, Arc<BranchSearchSnapshot>>>,
+    query_vec_cache: Arc<LruCache<(String, String), Vec<f32>>>,
 }
 
 impl std::fmt::Debug for MemSearchEngine {
@@ -191,6 +396,8 @@ impl MemSearchEngine {
             embedder,
             config,
             total_embedding_calls: Arc::new(AtomicUsize::new(0)),
+            snapshot_cache: Arc::new(LruCache::new(SNAPSHOT_CACHE_CAPACITY)),
+            query_vec_cache: Arc::new(LruCache::new(QUERY_VEC_CACHE_CAPACITY)),
         }
     }
 
@@ -371,8 +578,8 @@ impl MemSearchEngine {
             let mut chunk_stmt = tx
                 .prepare_cached(
                     "INSERT OR IGNORE INTO chunk_index
-                     (blob_id, chunk_seq, title, aliases, tags, heading_path, chunk_text, raw_snippet, start_line, end_line, embedding)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     (blob_id, chunk_seq, title, aliases, tags, heading_path, chunk_text, raw_snippet, start_line, end_line, embedding, embedding_bq)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )
                 .map_err(|e| MemError::Storage(format!("failed to prepare chunk insert: {e}")))?;
             let mut fts_stmt = tx
@@ -389,6 +596,12 @@ impl MemSearchEngine {
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                 )
                 .map_err(|e| MemError::Storage(format!("failed to prepare link insert: {e}")))?;
+            let mut sig_stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO blob_signatures (blob_id, simhash64, token_count)
+                     VALUES (?1, ?2, ?3)",
+                )
+                .map_err(|e| MemError::Storage(format!("failed to prepare signature insert: {e}")))?;
 
             for item in &pending {
                 let hex = item.blob_id.to_hex();
@@ -418,11 +631,17 @@ impl MemSearchEngine {
                 let fts_tags = augment_fts_text(&tags_joined);
 
                 for (idx, chunk) in item.parsed.chunks.iter().enumerate() {
-                    let emb_bytes = item
+                    let (emb_bytes, bq_bytes) = match item
                         .embeddings
                         .as_ref()
                         .and_then(|vecs| vecs.get(idx))
-                        .map(|v| encode_f32_vec(v));
+                    {
+                        Some(v) => {
+                            let norm = normalize_vec(v);
+                            (Some(encode_f32_vec(&norm)), Some(encode_bq_vec(&norm)))
+                        }
+                        None => (None, None),
+                    };
 
                     let seq_i64 = i64::try_from(chunk.chunk_seq).unwrap_or(0);
                     let start_i64 = i64::try_from(chunk.start_line).unwrap_or(1);
@@ -441,13 +660,14 @@ impl MemSearchEngine {
                             start_i64,
                             end_i64,
                             emb_bytes,
+                            bq_bytes,
                         ])
                         .map_err(|e| {
                             MemError::Storage(format!("failed to insert chunk_index: {e}"))
                         })?;
 
                     let fts_heading = augment_fts_text(&chunk.heading_path);
-                    let fts_body = augment_fts_text(&chunk.chunk_text);
+                    let fts_body = augment_fts_text(&chunk.raw_snippet);
 
                     fts_stmt
                         .execute(params![
@@ -509,6 +729,21 @@ impl MemSearchEngine {
                     stats.links_indexed += 1;
                 }
 
+                let body_for_sig: String = item
+                    .parsed
+                    .chunks
+                    .iter()
+                    .map(|c| c.raw_snippet.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let (simhash, tok_count) = compute_simhash64(&body_for_sig);
+                let simhash_i64 = i64::from_ne_bytes(simhash.to_ne_bytes());
+                sig_stmt
+                    .execute(params![hex, simhash_i64, i64::try_from(tok_count).unwrap_or(0)])
+                    .map_err(|e| {
+                        MemError::Storage(format!("failed to insert blob_signatures: {e}"))
+                    })?;
+
                 tx.execute(
                     "INSERT OR REPLACE INTO blob_index_model (blob_id, model) VALUES (?1, ?2)",
                     params![hex, model],
@@ -558,7 +793,111 @@ impl MemSearchEngine {
             items.extend(view.into_iter().map(|(path, blob_id, _)| (path, blob_id)));
         }
         // Rows are replaced blob by blob, group by group: a failure keeps the old rows of the rest.
-        self.index_blobs(&items, true)
+        let stats = self.index_blobs(&items, true)?;
+        self.snapshot_cache.clear();
+        Ok(stats)
+    }
+
+    fn load_or_build_snapshot(&self, rev: &Revision) -> Result<(Arc<BranchSearchSnapshot>, i64)> {
+        self.vcs.store().with_conn(|conn| {
+            let root_tree_id = resolve_commit_tree_id(conn, rev)?;
+            let ref_ms = revision_reference_time_ms(conn, rev)?;
+            let (ws_entries, ws_hash) = match rev {
+                Revision::BranchWorkspace(branch) => {
+                    let entries = workspace_list_conn(conn, branch)?;
+                    let hash = if entries.is_empty() {
+                        [0u8; 32]
+                    } else {
+                        let mut hasher = blake3::Hasher::new();
+                        for e in &entries {
+                            hasher.update(e.path.as_str().as_bytes());
+                            hasher.update(e.op.as_str().as_bytes());
+                            if let Some(b) = &e.blob_id {
+                                hasher.update(b.as_bytes());
+                            }
+                            if let Some(m) = &e.meta_json {
+                                hasher.update(m.as_bytes());
+                            }
+                        }
+                        *hasher.finalize().as_bytes()
+                    };
+                    (entries, hash)
+                }
+                Revision::BranchHead(_) | Revision::Commit(_) => (Vec::new(), [0u8; 32]),
+            };
+
+            let key = SnapshotKey {
+                root_tree_id,
+                ws_hash,
+            };
+            if let Some(cached) = self.snapshot_cache.get(&key) {
+                return Ok((cached, ref_ms));
+            }
+
+            let mut flat = flatten_tree_under(conn, &root_tree_id, None)?;
+            if !ws_entries.is_empty() {
+                apply_workspace_overlay(&mut flat, &ws_entries)?;
+            }
+
+            let mut raw_entries = Vec::with_capacity(flat.len());
+            let mut has_any_ttl = false;
+            for (path, (blob_id, meta_json)) in flat {
+                let meta = parse_metadata(&meta_json)?;
+                if meta.ttl_seconds.is_some() {
+                    has_any_ttl = true;
+                }
+                raw_entries.push((path, blob_id, meta));
+            }
+
+            let snapshot = Arc::new(BranchSearchSnapshot {
+                raw_entries,
+                has_any_ttl,
+                verified_scopes: Mutex::new(HashMap::new()),
+                cached_graph: Mutex::new(None),
+                cached_branch_graph: Mutex::new(None),
+                cached_vecs: Mutex::new(None),
+                cached_cochanges: Mutex::new(None),
+            });
+            self.snapshot_cache.insert(key, Arc::clone(&snapshot));
+            Ok((snapshot, ref_ms))
+        })
+    }
+
+    fn ensure_snapshot_indexed(
+        &self,
+        snap: &BranchSearchSnapshot,
+        prefix: Option<&VirtualPath>,
+        active_entries: &[(VirtualPath, BlobId, MemoryMetadata)],
+    ) -> Result<u64> {
+        let model = self.embedder.model_id();
+        let global_count = self
+            .vcs
+            .store()
+            .with_conn(|conn| current_model_index_count(conn, &model))?;
+
+        if snap.is_scope_verified(prefix, &model, global_count) {
+            return Ok(global_count);
+        }
+
+        let pairs: Vec<(VirtualPath, BlobId)> = active_entries
+            .iter()
+            .map(|(p, b, _)| (p.clone(), *b))
+            .collect();
+        let stats = self.index_unique_blobs(&pairs)?;
+        if stats.blobs_newly_indexed > 0 {
+            snap.invalidate_graph_caches();
+        }
+        let updated_count = if stats.blobs_newly_indexed > 0 {
+            self.vcs
+                .store()
+                .with_conn(|conn| current_model_index_count(conn, &model))?
+        } else {
+            global_count
+        };
+        if stats.blobs_newly_indexed + stats.blobs_cache_hit == stats.blobs_checked {
+            snap.mark_scope_verified(prefix, &model, updated_count);
+        }
+        Ok(updated_count)
     }
 
     /// Executes branch-scoped hybrid search: BM25 + Vector + 1-hop Wiki Graph RRF fusion.
@@ -567,17 +906,14 @@ impl MemSearchEngine {
             return Ok(Vec::new());
         }
 
-        // 1. Resolve strictly active files for the target revision (no cross-branch leakage).
-        let active_entries = self.vcs.list(&req.revision, req.path_prefix.as_ref())?;
+        // 1. Resolve strictly active files for the target revision via immutable snapshot cache.
+        let (snap, ref_ms) = self.load_or_build_snapshot(&req.revision)?;
+        let active_entries = snap.active_entries(req.path_prefix.as_ref(), ref_ms);
         if active_entries.is_empty() {
             return Ok(Vec::new());
         }
-
-        let pairs: Vec<(VirtualPath, BlobId)> = active_entries
-            .iter()
-            .map(|(p, b, _)| (p.clone(), *b))
-            .collect();
-        self.index_unique_blobs(&pairs)?;
+        let global_count =
+            self.ensure_snapshot_indexed(&snap, req.path_prefix.as_ref(), &active_entries)?;
 
         // Group active paths by BlobId and preserve metadata per path.
         let mut paths_by_blob: HashMap<BlobId, Vec<VirtualPath>> = HashMap::new();
@@ -587,91 +923,154 @@ impl MemSearchEngine {
             meta_by_path.insert(path, (blob_id, metadata));
         }
 
-        // 2. Embed query outside the SQLite lock.
-        let query_vec = self.embedder.embed_query(&req.query)?;
+        // 2. Embed query outside the SQLite lock (reusing Query Embedding LRU cache).
         let model = self.embedder.model_id();
+        let query_vec = if model == DISABLED_MODEL {
+            None
+        } else {
+            let cache_key = (model.clone(), req.query.trim().to_string());
+            if let Some(cached) = self.query_vec_cache.get(&cache_key) {
+                Some(cached)
+            } else {
+                let computed = self.embedder.embed_query(&req.query)?;
+                if let Some(ref vec) = computed {
+                    self.query_vec_cache.insert(cache_key, vec.clone());
+                }
+                computed
+            }
+        };
 
-        // 3. Query FTS5, active embeddings, chunk titles/aliases, and active blob_links inside one lock.
-        let active_data = self.vcs.store().with_conn(|conn| {
+        // 3. Reuse cached headers/links/graph and active vector index when available.
+        let fts_limit = (req.top_k * 5).max(50);
+        let active_sig = snap.active_signature(ref_ms);
+        let cached_graph = snap.cached_graph.lock().ok().and_then(|g| g.clone());
+        let reusable_graph = cached_graph.filter(|g| g.active_sig == active_sig);
+        let need_graph_load = reusable_graph.is_none();
+
+        let cached_vecs = if query_vec.is_some() {
+            snap.cached_vecs
+                .lock()
+                .ok()
+                .and_then(|v| v.clone())
+                .filter(|v| {
+                    v.active_sig == active_sig && v.model == model && v.global_count == global_count
+                })
+        } else {
+            None
+        };
+        let need_vec_load = query_vec.is_some() && cached_vecs.is_none();
+        let branch_for_telemetry = match &req.revision {
+            Revision::BranchWorkspace(b) | Revision::BranchHead(b) => Some(b.as_str()),
+            Revision::Commit(_) => None,
+        };
+
+        let mut active_data = self.vcs.store().with_conn(|conn| {
             load_active_search_data(
                 conn,
                 &paths_by_blob,
                 &req.query,
-                query_vec.as_deref().map(|v| (v, model.as_str())),
-                (req.top_k * 5).max(50),
+                need_vec_load.then_some(model.as_str()),
+                fts_limit,
+                need_graph_load,
+                branch_for_telemetry,
             )
         })?;
 
-        // 4. Build branch-scoped Wiki target resolver (mapping normalized path, stem, title, aliases -> paths).
-        let mut wiki_resolver: HashMap<String, Vec<VirtualPath>> = HashMap::new();
-        let mut title_by_blob: HashMap<BlobId, String> = HashMap::new();
-
-        for (blob_id, header) in &active_data.headers {
-            title_by_blob.insert(*blob_id, header.title.clone());
-            if let Some(paths) = paths_by_blob.get(blob_id) {
-                for path in paths {
-                    register_resolver_keys(
-                        &mut wiki_resolver,
-                        path,
-                        &header.title,
-                        &header.aliases,
-                    );
+        if let Some(q_raw) = query_vec.as_deref() {
+            let vec_slice: &[CachedChunkVector] = if let Some(ref cached) = cached_vecs {
+                &cached.chunks
+            } else {
+                let loaded = active_data.loaded_vecs.take().unwrap_or_default();
+                if req.path_prefix.is_none() && !snap.has_any_ttl {
+                    let cached = Arc::new(CachedVectorIndex {
+                        active_sig,
+                        model: model.clone(),
+                        global_count,
+                        chunks: loaded,
+                    });
+                    if let Ok(mut guard) = snap.cached_vecs.lock() {
+                        *guard = Some(Arc::clone(&cached));
+                    }
+                    // Score from the newly cached Arc.
+                    let (vh, vch) = score_chunk_vectors(
+                        q_raw,
+                        &cached.chunks,
+                        Some(&paths_by_blob),
+                        fts_limit,
+                    )?;
+                    active_data.vec_hits = vh;
+                    active_data.vec_chunk_hits = vch;
+                    &[]
+                } else {
+                    let (vh, vch) = score_chunk_vectors(q_raw, &loaded, None, fts_limit)?;
+                    active_data.vec_hits = vh;
+                    active_data.vec_chunk_hits = vch;
+                    &[]
                 }
-            }
-        }
-
-        // 5. Build branch-scoped outlinks, backlinks, and shared entity index.
-        let mut outlinks_map: HashMap<VirtualPath, BTreeSet<VirtualPath>> = HashMap::new();
-        let mut backlinks_map: HashMap<VirtualPath, BTreeSet<VirtualPath>> = HashMap::new();
-        let mut entity_nodes: HashMap<String, BTreeSet<VirtualPath>> = HashMap::new();
-
-        for link in &active_data.links {
-            let Some(source_paths) = paths_by_blob.get(&link.source_blob_id) else {
-                continue;
             };
-
-            match link.link_kind.as_str() {
-                "wikilink" => {
-                    if let Some(targets) = resolve_wiki_target(&wiki_resolver, &link.target_ref) {
-                        for src in source_paths {
-                            for tgt in &targets {
-                                if src != tgt {
-                                    outlinks_map
-                                        .entry(src.clone())
-                                        .or_default()
-                                        .insert(tgt.clone());
-                                    backlinks_map
-                                        .entry(tgt.clone())
-                                        .or_default()
-                                        .insert(src.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-                "entity_rel" => {
-                    let key_target = normalize_lookup_key(&link.target_ref);
-                    let key_source = normalize_lookup_key(&link.source_entity);
-                    for src in source_paths {
-                        if !key_target.is_empty() {
-                            entity_nodes
-                                .entry(key_target.clone())
-                                .or_default()
-                                .insert(src.clone());
-                        }
-                        if !key_source.is_empty() {
-                            entity_nodes
-                                .entry(key_source.clone())
-                                .or_default()
-                                .insert(src.clone());
-                        }
-                    }
-                }
-                _ => {}
+            if !vec_slice.is_empty() {
+                let filter = if req.path_prefix.is_some() || snap.has_any_ttl {
+                    Some(&paths_by_blob)
+                } else {
+                    None
+                };
+                let (vh, vch) = score_chunk_vectors(q_raw, vec_slice, filter, fts_limit)?;
+                active_data.vec_hits = vh;
+                active_data.vec_chunk_hits = vch;
             }
         }
 
-        // 6. Rank Channel 1 (FTS5 + CJK/lexical fallback) by VirtualPath.
+        let (headers_map, links_slice, resolved_graph) = if let Some(cached) = reusable_graph {
+            if req.path_prefix.is_none() && !snap.has_any_ttl {
+                (
+                    cached.headers.clone(),
+                    cached.links.clone(),
+                    cached.full_graph.clone(),
+                )
+            } else {
+                let scoped = build_resolved_graph(&paths_by_blob, &cached.headers, &cached.links);
+                (cached.headers.clone(), cached.links.clone(), scoped)
+            }
+        } else {
+            let headers_map = active_data.headers;
+            let links_vec = active_data.links;
+            let resolved = build_resolved_graph(&paths_by_blob, &headers_map, &links_vec);
+            if req.path_prefix.is_none() && !snap.has_any_ttl {
+                let cached = Arc::new(CachedGraphData {
+                    active_sig,
+                    headers: headers_map.clone(),
+                    links: links_vec.clone(),
+                    full_graph: resolved.clone(),
+                });
+                if let Ok(mut guard) = snap.cached_graph.lock() {
+                    *guard = Some(cached);
+                }
+            }
+            (headers_map, links_vec, resolved)
+        };
+
+        let title_by_blob: HashMap<BlobId, String> = headers_map
+            .iter()
+            .map(|(b, h)| (*b, h.title.clone()))
+            .collect();
+        let CachedResolvedGraph {
+            outlinks_map,
+            backlinks_map,
+            entity_nodes,
+            out_degrees,
+            in_degrees,
+        } = resolved_graph;
+
+        // 6. Rank Channel 1 (FTS5 + CJK/lexical fallback) at both chunk and document levels.
+        let mut bm25_chunk_rank: HashMap<(BlobId, usize), usize> = HashMap::new();
+        let mut bm25_sorted_chunks = active_data.fts_hits.clone();
+        bm25_sorted_chunks.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal));
+        for (idx, hit) in bm25_sorted_chunks.iter().enumerate() {
+            bm25_chunk_rank
+                .entry((hit.blob_id, hit.chunk_seq))
+                .or_insert(idx + 1);
+        }
+
         let mut bm25_best_by_blob: HashMap<BlobId, (usize, f64)> = HashMap::new();
         for hit in &active_data.fts_hits {
             bm25_best_by_blob
@@ -705,7 +1104,10 @@ impl MemSearchEngine {
 
         // Supplement with exact lexical fallback only when FTS5 produced no matches.
         if bm25_rank_by_path.is_empty() && !active_data.lexical_fallback.is_empty() {
-            for (blob_id, chunk_seq) in &active_data.lexical_fallback {
+            for (idx, (blob_id, chunk_seq)) in active_data.lexical_fallback.iter().enumerate() {
+                bm25_chunk_rank
+                    .entry((*blob_id, *chunk_seq))
+                    .or_insert(idx + 1);
                 if let Some(paths) = paths_by_blob.get(blob_id) {
                     for path in paths {
                         if !bm25_rank_by_path.contains_key(path) {
@@ -717,7 +1119,14 @@ impl MemSearchEngine {
             }
         }
 
-        // 7. Rank Channel 2 (Vector Cosine Similarity) by VirtualPath.
+        // 7. Rank Channel 2 (Vector Cosine Similarity) at both chunk and document levels.
+        let mut vec_chunk_rank: HashMap<(BlobId, usize), usize> = HashMap::new();
+        for (idx, (blob_id, chunk_seq, _)) in active_data.vec_chunk_hits.iter().enumerate() {
+            vec_chunk_rank
+                .entry((*blob_id, *chunk_seq))
+                .or_insert(idx + 1);
+        }
+
         let mut vec_rank_by_path: HashMap<VirtualPath, (usize, usize)> = HashMap::new();
         if !active_data.vec_hits.is_empty() {
             let mut vrank = 1usize;
@@ -761,7 +1170,38 @@ impl MemSearchEngine {
                 .then_with(|| a.0.cmp(&b.0))
         });
 
-        // 9. Channel 3: Obsidian 1-Hop Wiki Graph Expansion (Outlinks + Backlinks + Entity hops).
+        // 9. Channel 3: Hub-Penalized Obsidian 1-Hop Wiki Graph + Co-Change Expansion.
+        let cochange_map: Option<Arc<CoChangeAdjacency>> =
+            if self.config.enable_wiki_graph_expansion {
+                if let Some(branch) = branch_for_telemetry {
+                    let cached = snap.cached_cochanges.lock().ok().and_then(|c| c.clone());
+                    if let Some(cached) = cached {
+                        Some(cached)
+                    } else if let Ok((edges, _)) = mine_commit_history(&self.vcs, branch, 100) {
+                        let mut adj: CoChangeAdjacency = HashMap::new();
+                        for edge in edges {
+                            adj.entry(edge.path_a.clone())
+                                .or_default()
+                                .push((edge.path_b.clone(), edge.weight));
+                            adj.entry(edge.path_b)
+                                .or_default()
+                                .push((edge.path_a, edge.weight));
+                        }
+                        let arc_adj = Arc::new(adj);
+                        if let Ok(mut guard) = snap.cached_cochanges.lock() {
+                            *guard = Some(Arc::clone(&arc_adj));
+                        }
+                        Some(arc_adj)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         let mut graph_scores: HashMap<VirtualPath, f32> = HashMap::new();
         if self.config.enable_wiki_graph_expansion {
             let seed_limit = self.config.seed_top_m.max(1);
@@ -770,10 +1210,16 @@ impl MemSearchEngine {
                 if hop_delta <= 0.0 {
                     continue;
                 }
+                let seed_out_deg = out_degrees.get(seed_path).copied().unwrap_or(1).max(1);
+                let seed_in_deg = in_degrees.get(seed_path).copied().unwrap_or(1).max(1);
+
                 if let Some(outs) = outlinks_map.get(seed_path) {
                     for target in outs {
                         if target != seed_path {
-                            *graph_scores.entry(target.clone()).or_insert(0.0) += hop_delta;
+                            let target_in_deg = in_degrees.get(target).copied().unwrap_or(1).max(1);
+                            let deg_factor = ((seed_out_deg * target_in_deg) as f32).sqrt();
+                            *graph_scores.entry(target.clone()).or_insert(0.0) +=
+                                hop_delta / deg_factor;
                             candidate_paths.insert(target.clone());
                         }
                     }
@@ -781,24 +1227,38 @@ impl MemSearchEngine {
                 if let Some(backs) = backlinks_map.get(seed_path) {
                     for source in backs {
                         if source != seed_path {
-                            *graph_scores.entry(source.clone()).or_insert(0.0) += hop_delta;
+                            let source_out_deg =
+                                out_degrees.get(source).copied().unwrap_or(1).max(1);
+                            let deg_factor = ((source_out_deg * seed_in_deg) as f32).sqrt();
+                            *graph_scores.entry(source.clone()).or_insert(0.0) +=
+                                hop_delta / deg_factor;
                             candidate_paths.insert(source.clone());
+                        }
+                    }
+                }
+                if let Some(co_neighbors) = cochange_map.as_ref().and_then(|m| m.get(seed_path)) {
+                    for (neighbor, weight) in co_neighbors {
+                        if neighbor != seed_path && meta_by_path.contains_key(neighbor) {
+                            *graph_scores.entry(neighbor.clone()).or_insert(0.0) +=
+                                hop_delta * 0.4 * weight;
+                            candidate_paths.insert(neighbor.clone());
                         }
                     }
                 }
                 // Entity-triple 1-hop propagation at 0.7x wikilink decay.
                 if let Some((seed_blob, _)) = meta_by_path.get(seed_path) {
-                    for link in &active_data.links {
+                    for link in &links_slice {
                         if link.source_blob_id == *seed_blob && link.link_kind == "entity_rel" {
                             for entity_key in [
                                 normalize_lookup_key(&link.target_ref),
                                 normalize_lookup_key(&link.source_entity),
                             ] {
                                 if let Some(neighbors) = entity_nodes.get(&entity_key) {
+                                    let ent_deg = (neighbors.len().max(1) as f32).sqrt();
                                     for neighbor in neighbors {
                                         if neighbor != seed_path {
                                             *graph_scores.entry(neighbor.clone()).or_insert(0.0) +=
-                                                hop_delta * 0.7;
+                                                (hop_delta * 0.7) / ent_deg;
                                             candidate_paths.insert(neighbor.clone());
                                         }
                                     }
@@ -814,7 +1274,7 @@ impl MemSearchEngine {
             return Ok(Vec::new());
         }
 
-        // 10. Combine scores with importance boost and select top_k before fetching snippets.
+        // 10. Combine scores with chunk-level RRF best-chunk selection, importance, and tier prior.
         struct ScoredCandidate {
             path: VirtualPath,
             blob_id: BlobId,
@@ -823,6 +1283,11 @@ impl MemSearchEngine {
             bm25_rank: Option<usize>,
             vector_rank: Option<usize>,
             graph_score: f32,
+        }
+
+        let mut chunks_by_blob: HashMap<BlobId, HashSet<usize>> = HashMap::new();
+        for &(blob_id, seq) in bm25_chunk_rank.keys().chain(vec_chunk_rank.keys()) {
+            chunks_by_blob.entry(blob_id).or_default().insert(seq);
         }
 
         let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(candidate_paths.len());
@@ -843,12 +1308,43 @@ impl MemSearchEngine {
             let graph_part = self.config.graph_weight * g_score;
 
             let importance_boost = 1.0 + 0.2 * metadata.importance.clamp(0.0, 1.0);
-            let total_score = (bm25_part + vec_part + graph_part) * importance_boost;
+            let tier_prior = if req.path_prefix.is_none() && path.tier() == MemoryTier::Episodic {
+                0.92
+            } else {
+                1.0
+            };
+            let utility_boost = active_data
+                .telemetry
+                .get(&path)
+                .map(|row| utility_multiplier(row, blob_id))
+                .unwrap_or(1.0);
+            let total_score =
+                (bm25_part + vec_part + graph_part) * importance_boost * tier_prior * utility_boost;
 
-            let best_chunk_seq = bm25_entry
-                .map(|(_, seq)| seq)
-                .or_else(|| vec_entry.map(|(_, seq)| seq))
-                .unwrap_or(0);
+            let best_chunk_seq = if let Some(seqs) = chunks_by_blob.get(blob_id) {
+                seqs.iter()
+                    .copied()
+                    .max_by(|&seq_a, &seq_b| {
+                        let score_chunk = |seq: usize| -> f32 {
+                            let br = bm25_chunk_rank
+                                .get(&(*blob_id, seq))
+                                .map(|&r| self.config.bm25_weight / (k + r as f32))
+                                .unwrap_or(0.0);
+                            let vr = vec_chunk_rank
+                                .get(&(*blob_id, seq))
+                                .map(|&r| self.config.vector_weight / (k + r as f32))
+                                .unwrap_or(0.0);
+                            br + vr
+                        };
+                        score_chunk(seq_a)
+                            .partial_cmp(&score_chunk(seq_b))
+                            .unwrap_or(Ordering::Equal)
+                            .then_with(|| seq_b.cmp(&seq_a))
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             scored.push(ScoredCandidate {
                 path,
@@ -867,19 +1363,28 @@ impl MemSearchEngine {
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.path.cmp(&b.path))
         });
-        scored.truncate(req.top_k);
 
-        // 11. Fetch chunk snippets for the winning top_k candidates.
-        let chunk_keys: Vec<(BlobId, usize)> =
-            scored.iter().map(|c| (c.blob_id, c.chunk_seq)).collect();
+        // 11. Fetch snippets for MMR diversity window + adjacent chunk merging, then pick top_k.
+        let mmr_window = (req.top_k * 3).max(req.top_k).min(scored.len());
+        let mut chunk_keys: Vec<(BlobId, usize)> = Vec::with_capacity(mmr_window * 2);
+        for cand in scored.iter().take(mmr_window) {
+            chunk_keys.push((cand.blob_id, cand.chunk_seq));
+            let next_seq = cand.chunk_seq + 1;
+            if bm25_chunk_rank.contains_key(&(cand.blob_id, next_seq))
+                || vec_chunk_rank.contains_key(&(cand.blob_id, next_seq))
+            {
+                chunk_keys.push((cand.blob_id, next_seq));
+            }
+        }
         let chunk_details = self
             .vcs
             .store()
             .with_conn(|conn| fetch_chunk_details(conn, &chunk_keys))?;
 
-        let mut results = Vec::with_capacity(scored.len());
-        for cand in scored {
-            let detail = chunk_details
+        let mut pool: Vec<(ScoredCandidate, ChunkDetail, HashSet<String>)> =
+            Vec::with_capacity(mmr_window);
+        for cand in scored.into_iter().take(mmr_window) {
+            let mut detail = chunk_details
                 .get(&(cand.blob_id, cand.chunk_seq))
                 .cloned()
                 .unwrap_or_else(|| ChunkDetail {
@@ -893,6 +1398,55 @@ impl MemSearchEngine {
                     end_line: 1,
                 });
 
+            let next_seq = cand.chunk_seq + 1;
+            if bm25_chunk_rank.contains_key(&(cand.blob_id, next_seq))
+                || vec_chunk_rank.contains_key(&(cand.blob_id, next_seq))
+            {
+                if let Some(next_detail) = chunk_details.get(&(cand.blob_id, next_seq)) {
+                    if detail.heading_path == next_detail.heading_path
+                        && detail.raw_snippet.len() + next_detail.raw_snippet.len()
+                            <= self.config.chunk_max_chars * 2
+                    {
+                        detail.raw_snippet =
+                            format!("{}\n{}", detail.raw_snippet, next_detail.raw_snippet);
+                        detail.end_line = next_detail.end_line;
+                    }
+                }
+            }
+            let tokens = snippet_tokens(&detail.raw_snippet);
+            pool.push((cand, detail, tokens));
+        }
+
+        let mut selected: Vec<(ScoredCandidate, ChunkDetail, HashSet<String>)> =
+            Vec::with_capacity(req.top_k.min(pool.len()));
+        while selected.len() < req.top_k && !pool.is_empty() {
+            let mut best_idx = 0usize;
+            let mut best_mmr = f32::NEG_INFINITY;
+            for (idx, (cand, _, toks)) in pool.iter().enumerate() {
+                let redundant = !toks.is_empty()
+                    && selected.iter().any(|(sel_cand, _, sel_toks)| {
+                        sel_cand.path.tier() != MemoryTier::Episodic
+                            && token_jaccard(toks, sel_toks) >= 0.80
+                    });
+                let eff_score = if redundant {
+                    cand.score * 0.55
+                } else {
+                    cand.score
+                };
+                if eff_score > best_mmr
+                    || (eff_score == best_mmr && cand.path < pool[best_idx].0.path)
+                {
+                    best_mmr = eff_score;
+                    best_idx = idx;
+                }
+            }
+            selected.push(pool.remove(best_idx));
+        }
+
+        let mut results = Vec::with_capacity(selected.len());
+        let mut hit_telemetry_pairs: Vec<(VirtualPath, BlobId)> =
+            Vec::with_capacity(selected.len());
+        for (cand, detail, _) in selected {
             let outlinks = outlinks_map
                 .get(&cand.path)
                 .map(|s| s.iter().cloned().collect())
@@ -902,6 +1456,7 @@ impl MemSearchEngine {
                 .map(|s| s.iter().cloned().collect())
                 .unwrap_or_default();
 
+            hit_telemetry_pairs.push((cand.path.clone(), cand.blob_id));
             results.push(SearchHit {
                 path: cand.path,
                 blob_id: cand.blob_id,
@@ -917,6 +1472,10 @@ impl MemSearchEngine {
                 outlinks,
                 backlinks,
             });
+        }
+
+        if let Some(branch) = branch_for_telemetry {
+            let _ = record_search_hits(self.vcs.store(), branch, &hit_telemetry_pairs);
         }
 
         Ok(results)
@@ -970,8 +1529,18 @@ impl MemSearchEngine {
             Revision::BranchWorkspace(b) | Revision::BranchHead(b) => b.clone(),
             Revision::Commit(cid) => cid.to_hex(),
         };
-        let active = self.vcs.list(rev, None)?;
-        self.ensure_revision_indexed(rev, None)?;
+        let (snap, ref_ms) = self.load_or_build_snapshot(rev)?;
+        let active = snap.active_entries(None, ref_ms);
+        self.ensure_snapshot_indexed(&snap, None, &active)?;
+
+        let active_sig = snap.active_signature(ref_ms);
+        if let Ok(guard) = snap.cached_branch_graph.lock() {
+            if let Some((sig, ref cached)) = *guard {
+                if sig == active_sig {
+                    return Ok((**cached).clone());
+                }
+            }
+        }
 
         let mut paths_by_blob: HashMap<BlobId, Vec<VirtualPath>> = HashMap::new();
         for (path, blob_id, _) in &active {
@@ -1206,11 +1775,15 @@ impl MemSearchEngine {
             })
             .collect();
 
-        Ok(BranchGraph {
+        let graph = BranchGraph {
             branch,
             nodes,
             edges,
-        })
+        };
+        if let Ok(mut guard) = snap.cached_branch_graph.lock() {
+            *guard = Some((active_sig, Arc::new(graph.clone())));
+        }
+        Ok(graph)
     }
 }
 
@@ -1315,17 +1888,20 @@ fn normalize_relative_virtual_path(src: &VirtualPath, target_ref: &str) -> Optio
     }
 }
 
+#[derive(Clone)]
 struct ActiveBlobHeader {
     title: String,
     aliases: Vec<String>,
 }
 
+#[derive(Clone)]
 struct FtsHit {
     blob_id: BlobId,
     chunk_seq: usize,
     score: f64,
 }
 
+#[derive(Clone)]
 struct ActiveLinkRow {
     source_blob_id: BlobId,
     link_kind: String,
@@ -1334,11 +1910,14 @@ struct ActiveLinkRow {
 }
 
 struct ActiveSearchData {
-    headers: Vec<(BlobId, ActiveBlobHeader)>,
+    headers: HashMap<BlobId, ActiveBlobHeader>,
     fts_hits: Vec<FtsHit>,
     lexical_fallback: Vec<(BlobId, usize)>,
     vec_hits: Vec<(BlobId, usize, f32)>,
+    vec_chunk_hits: Vec<(BlobId, usize, f32)>,
+    loaded_vecs: Option<Vec<CachedChunkVector>>,
     links: Vec<ActiveLinkRow>,
+    telemetry: HashMap<VirtualPath, TelemetryRow>,
 }
 
 #[derive(Clone)]
@@ -1350,13 +1929,206 @@ struct ChunkDetail {
     end_line: usize,
 }
 
+fn current_model_index_count(conn: &Connection, model: &str) -> Result<u64> {
+    let count: i64 = if model == DISABLED_MODEL {
+        conn.query_row("SELECT COUNT(DISTINCT blob_id) FROM chunk_index", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| MemError::Storage(format!("failed to count chunk_index blobs: {e}")))?
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM blob_index_model WHERE model = ?1",
+            params![model],
+            |r| r.get(0),
+        )
+        .map_err(|e| MemError::Storage(format!("failed to count blob_index_model rows: {e}")))?
+    };
+    Ok(u64::try_from(count.max(0)).unwrap_or(0))
+}
+
+fn build_resolved_graph(
+    paths_by_blob: &HashMap<BlobId, Vec<VirtualPath>>,
+    headers: &HashMap<BlobId, ActiveBlobHeader>,
+    links: &[ActiveLinkRow],
+) -> CachedResolvedGraph {
+    let mut wiki_resolver: HashMap<String, Vec<VirtualPath>> = HashMap::new();
+    let mut active_paths: Vec<VirtualPath> = Vec::new();
+    let mut active_paths_by_lower: HashMap<String, VirtualPath> = HashMap::new();
+
+    for (blob_id, paths) in paths_by_blob {
+        let header = headers.get(blob_id);
+        for path in paths {
+            active_paths.push(path.clone());
+            active_paths_by_lower.insert(path.as_str().to_lowercase(), path.clone());
+            if let Some(h) = header {
+                register_resolver_keys(&mut wiki_resolver, path, &h.title, &h.aliases);
+            } else {
+                let fallback = path
+                    .file_name()
+                    .and_then(|n| n.strip_suffix(".md").or(Some(n)))
+                    .unwrap_or_else(|| path.as_str());
+                register_resolver_keys(&mut wiki_resolver, path, fallback, &[]);
+            }
+        }
+    }
+
+    let mut outlinks_map: HashMap<VirtualPath, BTreeSet<VirtualPath>> = HashMap::new();
+    let mut backlinks_map: HashMap<VirtualPath, BTreeSet<VirtualPath>> = HashMap::new();
+    let mut entity_nodes: HashMap<String, BTreeSet<VirtualPath>> = HashMap::new();
+
+    for link in links {
+        let Some(source_paths) = paths_by_blob.get(&link.source_blob_id) else {
+            continue;
+        };
+
+        match link.link_kind.as_str() {
+            "wikilink" => {
+                for src in source_paths {
+                    if let Some(targets) = resolve_branch_graph_target(
+                        src,
+                        &link.target_ref,
+                        &wiki_resolver,
+                        &active_paths_by_lower,
+                        &active_paths,
+                    ) {
+                        for tgt in &targets {
+                            if src != tgt {
+                                outlinks_map
+                                    .entry(src.clone())
+                                    .or_default()
+                                    .insert(tgt.clone());
+                                backlinks_map
+                                    .entry(tgt.clone())
+                                    .or_default()
+                                    .insert(src.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            "entity_rel" => {
+                let key_target = normalize_lookup_key(&link.target_ref);
+                let key_source = normalize_lookup_key(&link.source_entity);
+                for src in source_paths {
+                    if !key_target.is_empty() {
+                        entity_nodes
+                            .entry(key_target.clone())
+                            .or_default()
+                            .insert(src.clone());
+                    }
+                    if !key_source.is_empty() {
+                        entity_nodes
+                            .entry(key_source.clone())
+                            .or_default()
+                            .insert(src.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let out_degrees: HashMap<VirtualPath, usize> = outlinks_map
+        .iter()
+        .map(|(k, v)| (k.clone(), v.len()))
+        .collect();
+    let in_degrees: HashMap<VirtualPath, usize> = backlinks_map
+        .iter()
+        .map(|(k, v)| (k.clone(), v.len()))
+        .collect();
+
+    CachedResolvedGraph {
+        outlinks_map,
+        backlinks_map,
+        entity_nodes,
+        out_degrees,
+        in_degrees,
+    }
+}
+
+type VectorScoreResult = (Vec<(BlobId, usize, f32)>, Vec<(BlobId, usize, f32)>);
+
+fn score_chunk_vectors(
+    q_raw: &[f32],
+    chunks: &[CachedChunkVector],
+    blob_filter: Option<&HashMap<BlobId, Vec<VirtualPath>>>,
+    fts_limit: usize,
+) -> Result<VectorScoreResult> {
+    if chunks.is_empty() || q_raw.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let q_unit = normalize_vec(q_raw);
+    let q_bq = decode_bq_words(&encode_bq_vec(&q_unit));
+    let dim = q_unit.len();
+
+    let use_bq_coarse = dim >= 64
+        && chunks.len() > 256
+        && !q_bq.is_empty()
+        && chunks.iter().all(|c| !c.bq_words.is_empty());
+
+    let candidate_indices: Vec<usize> = if use_bq_coarse {
+        let mut rough: Vec<(usize, u32)> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| blob_filter.is_none_or(|f| f.contains_key(&c.blob_id)))
+            .map(|(idx, c)| (idx, bq_hamming_distance_words(&q_bq, &c.bq_words)))
+            .collect();
+        let coarse_k = (fts_limit * 4).max(256);
+        if rough.len() > coarse_k {
+            rough.select_nth_unstable_by_key(coarse_k - 1, |&(_, dist)| dist);
+            rough.truncate(coarse_k);
+        }
+        rough.into_iter().map(|(idx, _)| idx).collect()
+    } else {
+        (0..chunks.len())
+            .filter(|&idx| blob_filter.is_none_or(|f| f.contains_key(&chunks[idx].blob_id)))
+            .collect()
+    };
+
+    let mut vec_chunk_hits = Vec::new();
+    let mut vec_best_by_blob: HashMap<BlobId, (usize, f32)> = HashMap::new();
+    for idx in candidate_indices {
+        let c = &chunks[idx];
+        let sim = if !c.bq_words.is_empty() {
+            dot_product_le_bytes(&q_unit, &c.f32_bytes)?
+        } else {
+            cosine_similarity_le_bytes(&q_unit, &c.f32_bytes)?
+        };
+        if sim <= 0.0 {
+            continue;
+        }
+        vec_chunk_hits.push((c.blob_id, c.chunk_seq, sim));
+        vec_best_by_blob
+            .entry(c.blob_id)
+            .and_modify(|cur| {
+                if sim > cur.1 {
+                    *cur = (c.chunk_seq, sim);
+                }
+            })
+            .or_insert((c.chunk_seq, sim));
+    }
+
+    vec_chunk_hits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
+    vec_chunk_hits.truncate(fts_limit * 2);
+
+    let mut vec_hits: Vec<(BlobId, usize, f32)> = vec_best_by_blob
+        .into_iter()
+        .map(|(b, (seq, s))| (b, seq, s))
+        .collect();
+    vec_hits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
+    vec_hits.truncate(fts_limit);
+
+    Ok((vec_hits, vec_chunk_hits))
+}
+
 fn load_active_search_data(
     conn: &Connection,
     paths_by_blob: &HashMap<BlobId, Vec<VirtualPath>>,
     query: &str,
-    // The query vector and the model that made it.
-    query_vec: Option<(&[f32], &str)>,
+    load_vecs_model: Option<&str>,
     fts_limit: usize,
+    need_graph_load: bool,
+    telemetry_branch: Option<&str>,
 ) -> Result<ActiveSearchData> {
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS _mem_active_blobs (blob_id TEXT PRIMARY KEY);
@@ -1376,9 +2148,9 @@ fn load_active_search_data(
     }
 
     let result = (|| {
-        // 1. Load headers (title + aliases from chunk_seq = 0) for wiki link resolution.
-        let mut headers = Vec::new();
-        {
+        // 1. Load headers (title + aliases from chunk_seq = 0) when not cached.
+        let mut headers = HashMap::new();
+        if need_graph_load {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT c.blob_id, c.title, c.aliases
@@ -1408,44 +2180,35 @@ fn load_active_search_data(
                         .filter(|s| !s.is_empty())
                         .collect()
                 };
-                headers.push((BlobId::from_hex(&hex)?, ActiveBlobHeader { title, aliases }));
+                headers.insert(BlobId::from_hex(&hex)?, ActiveBlobHeader { title, aliases });
             }
         }
 
-        // 2. Run FTS5 multi-column weighted BM25 query filtered strictly by _mem_active_blobs.
+        // 2. Run two-stage FTS5 multi-column weighted BM25 query filtered strictly by _mem_active_blobs.
         let mut fts_hits = Vec::new();
-        if let Some(fts_query) = build_fts5_query(query) {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT f.blob_id, f.chunk_seq,
-                            bm25(fts_chunks, 0.0, 0.0, 5.0, 5.0, 3.0, 2.0, 1.0) AS rank_score
-                     FROM fts_chunks AS f
-                     INNER JOIN _mem_active_blobs AS a ON a.blob_id = f.blob_id
-                     WHERE fts_chunks MATCH ?1
-                     ORDER BY rank_score ASC
-                     LIMIT ?2",
-                )
-                .map_err(|e| MemError::Storage(format!("failed to prepare FTS5 query: {e}")))?;
-            let rows = stmt
-                .query_map(
-                    params![fts_query, i64::try_from(fts_limit).unwrap_or(100)],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, f64>(2)?,
-                        ))
-                    },
-                )
-                .map_err(|e| MemError::Storage(format!("failed to execute FTS5 query: {e}")))?;
-            for row in rows {
-                let (hex, seq, score) =
-                    row.map_err(|e| MemError::Storage(format!("failed to decode FTS5 row: {e}")))?;
-                fts_hits.push(FtsHit {
-                    blob_id: BlobId::from_hex(&hex)?,
-                    chunk_seq: usize::try_from(seq.max(0)).unwrap_or(0),
-                    score,
-                });
+        let mut seen_fts_chunks: HashSet<(BlobId, usize)> = HashSet::new();
+        let fts_plan = build_fts5_queries(query);
+
+        if let Some(ref and_q) = fts_plan.strict_and {
+            execute_fts_query(
+                conn,
+                and_q,
+                fts_limit,
+                -1000.0,
+                &mut seen_fts_chunks,
+                &mut fts_hits,
+            )?;
+        }
+        if fts_hits.len() < fts_limit {
+            if let Some(ref or_q) = fts_plan.relaxed_or {
+                execute_fts_query(
+                    conn,
+                    or_q,
+                    fts_limit,
+                    0.0,
+                    &mut seen_fts_chunks,
+                    &mut fts_hits,
+                )?;
             }
         }
 
@@ -1454,13 +2217,13 @@ fn load_active_search_data(
         if fts_hits.is_empty() && !query.trim().is_empty() {
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT c.blob_id, c.chunk_seq, c.title, c.aliases, c.tags, c.heading_path, c.chunk_text
+                    "SELECT c.blob_id, c.chunk_seq, c.title, c.aliases, c.tags, c.heading_path, c.raw_snippet
                      FROM chunk_index AS c
                      INNER JOIN _mem_active_blobs AS a ON a.blob_id = c.blob_id
                      WHERE INSTR(LOWER(c.title), LOWER(?1)) > 0
                         OR INSTR(LOWER(c.aliases), LOWER(?1)) > 0
                         OR INSTR(LOWER(c.tags), LOWER(?1)) > 0
-                        OR INSTR(LOWER(c.chunk_text), LOWER(?1)) > 0",
+                        OR INSTR(LOWER(c.raw_snippet), LOWER(?1)) > 0",
                 )
                 .map_err(|e| {
                     MemError::Storage(format!("failed to prepare lexical fallback query: {e}"))
@@ -1504,14 +2267,14 @@ fn load_active_search_data(
             }
         }
 
-        // 4. Score active embeddings zero-allocation directly from SQLite BLOB slices.
-        let mut vec_hits = Vec::new();
-        if let Some((q_vec, model)) = query_vec {
+        // 4. Load active embeddings for the active model when not cached in snapshot.
+        let mut loaded_vecs = None;
+        if let Some(model) = load_vecs_model {
             let mut stmt = conn
                 .prepare_cached(
                     // Only vectors of the active model: another model's vectors (not yet
                     // re-embedded) give meaningless similarities.
-                    "SELECT c.blob_id, c.chunk_seq, c.embedding
+                    "SELECT c.blob_id, c.chunk_seq, c.embedding, c.embedding_bq
                      FROM chunk_index AS c
                      INNER JOIN _mem_active_blobs AS a ON a.blob_id = c.blob_id
                      INNER JOIN blob_index_model AS m ON m.blob_id = c.blob_id AND m.model = ?1
@@ -1523,20 +2286,11 @@ fn load_active_search_data(
             let mut rows = stmt.query(params![model]).map_err(|e| {
                 MemError::Storage(format!("failed to query active embeddings: {e}"))
             })?;
-            let mut vec_best_by_blob: HashMap<BlobId, (usize, f32)> = HashMap::new();
+            let mut vecs = Vec::new();
             while let Some(row) = rows
                 .next()
                 .map_err(|e| MemError::Storage(format!("failed to step embedding row: {e}")))?
             {
-                let vec_bytes = row
-                    .get_ref(2)
-                    .map_err(|e| MemError::Storage(format!("failed to read embedding ref: {e}")))?
-                    .as_bytes()
-                    .map_err(|e| MemError::Storage(format!("invalid embedding blob type: {e}")))?;
-                let sim = cosine_similarity_le_bytes(q_vec, vec_bytes)?;
-                if sim <= 0.0 {
-                    continue;
-                }
                 let hex = row
                     .get_ref(0)
                     .map_err(|e| MemError::Storage(format!("failed to read blob_id ref: {e}")))?
@@ -1545,28 +2299,29 @@ fn load_active_search_data(
                 let seq_i64 = row
                     .get::<_, i64>(1)
                     .map_err(|e| MemError::Storage(format!("failed to read chunk_seq: {e}")))?;
-                let blob_id = BlobId::from_hex(hex)?;
-                let chunk_seq = usize::try_from(seq_i64.max(0)).unwrap_or(0);
-                vec_best_by_blob
-                    .entry(blob_id)
-                    .and_modify(|cur| {
-                        if sim > cur.1 {
-                            *cur = (chunk_seq, sim);
-                        }
-                    })
-                    .or_insert((chunk_seq, sim));
+                let f32_bytes = row
+                    .get_ref(2)
+                    .map_err(|e| MemError::Storage(format!("failed to read embedding ref: {e}")))?
+                    .as_bytes()
+                    .map_err(|e| MemError::Storage(format!("invalid embedding blob type: {e}")))?
+                    .to_vec();
+                let bq_words = match row.get_ref(3) {
+                    Ok(rusqlite::types::ValueRef::Blob(b)) => decode_bq_words(b),
+                    _ => Vec::new(),
+                };
+                vecs.push(CachedChunkVector {
+                    blob_id: BlobId::from_hex(hex)?,
+                    chunk_seq: usize::try_from(seq_i64.max(0)).unwrap_or(0),
+                    f32_bytes,
+                    bq_words,
+                });
             }
-            vec_hits = vec_best_by_blob
-                .into_iter()
-                .map(|(b, (seq, s))| (b, seq, s))
-                .collect();
-            vec_hits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
-            vec_hits.truncate(fts_limit);
+            loaded_vecs = Some(vecs);
         }
 
-        // 5. Load branch-scoped graph edges from blob_links.
+        // 5. Load branch-scoped graph edges from blob_links when not cached.
         let mut links = Vec::new();
-        {
+        if need_graph_load {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT l.source_blob_id, l.link_kind, l.source_entity, l.target_ref
@@ -1598,17 +2353,72 @@ fn load_active_search_data(
             }
         }
 
+        let telemetry = match telemetry_branch {
+            Some(branch) => load_branch_telemetry(conn, branch)?,
+            None => HashMap::new(),
+        };
+
         Ok(ActiveSearchData {
             headers,
             fts_hits,
             lexical_fallback,
-            vec_hits,
+            vec_hits: Vec::new(),
+            vec_chunk_hits: Vec::new(),
+            loaded_vecs,
             links,
+            telemetry,
         })
     })();
 
     let _ = conn.execute("DELETE FROM _mem_active_blobs", []);
     result
+}
+
+fn execute_fts_query(
+    conn: &Connection,
+    fts_query: &str,
+    fts_limit: usize,
+    score_offset: f64,
+    seen_fts_chunks: &mut HashSet<(BlobId, usize)>,
+    fts_hits: &mut Vec<FtsHit>,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT f.blob_id, f.chunk_seq,
+                    bm25(fts_chunks, 0.0, 0.0, 5.0, 5.0, 3.0, 2.0, 1.0) AS rank_score
+             FROM fts_chunks AS f
+             INNER JOIN _mem_active_blobs AS a ON a.blob_id = f.blob_id
+             WHERE fts_chunks MATCH ?1
+             ORDER BY rank_score ASC
+             LIMIT ?2",
+        )
+        .map_err(|e| MemError::Storage(format!("failed to prepare FTS5 query: {e}")))?;
+    let rows = stmt
+        .query_map(
+            params![fts_query, i64::try_from(fts_limit).unwrap_or(100)],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| MemError::Storage(format!("failed to execute FTS5 query: {e}")))?;
+    for row in rows {
+        let (hex, seq, score) =
+            row.map_err(|e| MemError::Storage(format!("failed to decode FTS5 row: {e}")))?;
+        let blob_id = BlobId::from_hex(&hex)?;
+        let chunk_seq = usize::try_from(seq.max(0)).unwrap_or(0);
+        if seen_fts_chunks.insert((blob_id, chunk_seq)) {
+            fts_hits.push(FtsHit {
+                blob_id,
+                chunk_seq,
+                score: score + score_offset,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn fetch_chunk_details(
@@ -1683,54 +2493,189 @@ fn augment_fts_text(text: &str) -> String {
     }
 }
 
-fn build_fts5_query(query: &str) -> Option<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+struct FtsQueryPlan {
+    strict_and: Option<String>,
+    relaxed_or: Option<String>,
+}
+
+fn is_query_stopword(lower: &str) -> bool {
+    matches!(
+        lower,
+        "如何"
+            | "怎么"
+            | "怎样"
+            | "什么"
+            | "哪些"
+            | "为什么"
+            | "请问"
+            | "进行"
+            | "使用"
+            | "问题"
+            | "的"
+            | "了"
+            | "吗"
+            | "呢"
+            | "是"
+            | "在"
+            | "和"
+            | "与"
+            | "及"
+            | "或"
+            | "the"
+            | "a"
+            | "an"
+            | "how"
+            | "what"
+            | "why"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "to"
+            | "of"
+            | "in"
+            | "on"
+            | "for"
+            | "with"
+            | "by"
+            | "at"
+            | "from"
+            | "as"
+            | "into"
+            | "about"
+    )
+}
+
+fn build_fts5_queries(query: &str) -> FtsQueryPlan {
+    let mut raw_segments: Vec<(String, Vec<String>)> = Vec::new();
 
     for raw in query.split(|c: char| !c.is_alphanumeric() && c != '_') {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
         }
+        let lower = trimmed.to_lowercase();
+        let mut seg_terms: Vec<String> = Vec::new();
+        let mut seg_seen: HashSet<String> = HashSet::new();
+
         // FTS5 `unicode61` splits `_` into adjacent tokens, so quoting `"BUSY_TIMEOUT"`
         // forms an exact phrase `"busy timeout"` that matches cleanly.
-        let lower = trimmed.to_lowercase();
-        if seen.insert(lower) {
+        if seg_seen.insert(lower.clone()) {
             let escaped = trimmed.replace('"', "\"\"");
-            tokens.push(format!("\"{escaped}\""));
+            seg_terms.push(format!("\"{escaped}\""));
         }
 
-        // Also emit CJK bigrams for multi-character CJK runs so substrings match via FTS5.
         let mut cjk_run: Vec<char> = Vec::new();
+        let mut push_cjk_bigrams = |run: &mut Vec<char>| {
+            if run.len() >= 2 {
+                for pair in run.windows(2) {
+                    let bg: String = pair.iter().collect();
+                    if !is_query_stopword(&bg) && seg_seen.insert(bg.clone()) {
+                        seg_terms.push(format!("\"{bg}\""));
+                    }
+                }
+            }
+            run.clear();
+        };
         for ch in trimmed.chars() {
             if is_cjk(ch) {
                 cjk_run.push(ch);
             } else {
-                if cjk_run.len() >= 2 {
-                    for pair in cjk_run.windows(2) {
-                        let bg: String = pair.iter().collect();
-                        if seen.insert(bg.clone()) {
-                            tokens.push(format!("\"{bg}\""));
-                        }
-                    }
-                }
-                cjk_run.clear();
+                push_cjk_bigrams(&mut cjk_run);
             }
         }
-        if cjk_run.len() >= 2 {
-            for pair in cjk_run.windows(2) {
-                let bg: String = pair.iter().collect();
-                if seen.insert(bg.clone()) {
-                    tokens.push(format!("\"{bg}\""));
-                }
+        push_cjk_bigrams(&mut cjk_run);
+        raw_segments.push((lower, seg_terms));
+    }
+
+    if raw_segments.is_empty() {
+        return FtsQueryPlan {
+            strict_and: None,
+            relaxed_or: None,
+        };
+    }
+
+    let non_stop: Vec<&(String, Vec<String>)> = raw_segments
+        .iter()
+        .filter(|(lower, _)| !is_query_stopword(lower))
+        .collect();
+    let chosen: Vec<&(String, Vec<String>)> = if non_stop.is_empty() {
+        raw_segments.iter().collect()
+    } else {
+        non_stop
+    };
+
+    let mut flat_or_terms: Vec<String> = Vec::new();
+    let mut seen_or: HashSet<String> = HashSet::new();
+    let mut and_groups: Vec<String> = Vec::new();
+    let mut seen_seg: HashSet<String> = HashSet::new();
+
+    for (lower, seg_terms) in chosen {
+        let mut group_terms = Vec::new();
+        for t in seg_terms.iter().take(6) {
+            group_terms.push(t.clone());
+            if seen_or.insert(t.clone()) && flat_or_terms.len() < 16 {
+                flat_or_terms.push(t.clone());
+            }
+        }
+        if seen_seg.insert(lower.clone()) && !group_terms.is_empty() {
+            if group_terms.len() == 1 {
+                and_groups.push(group_terms.into_iter().next().unwrap_or_default());
+            } else {
+                and_groups.push(format!("({})", group_terms.join(" OR ")));
             }
         }
     }
 
-    if tokens.is_empty() {
+    let strict_and = if and_groups.len() >= 2 {
+        Some(and_groups.join(" AND "))
+    } else {
+        None
+    };
+    let relaxed_or = if flat_or_terms.is_empty() {
         None
     } else {
-        Some(tokens.join(" OR "))
+        Some(flat_or_terms.join(" OR "))
+    };
+
+    FtsQueryPlan {
+        strict_and,
+        relaxed_or,
+    }
+}
+
+fn snippet_tokens(text: &str) -> HashSet<String> {
+    let lower = text.to_lowercase();
+    let mut toks = HashSet::new();
+    for tok in lower.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if tok.chars().count() >= 2 {
+            toks.insert(tok.to_string());
+        }
+    }
+    let cjk: Vec<char> = lower.chars().filter(|&c| is_cjk(c)).collect();
+    for pair in cjk.windows(2) {
+        let mut bg = String::with_capacity(8);
+        bg.push(pair[0]);
+        bg.push(pair[1]);
+        toks.insert(bg);
+    }
+    toks
+}
+
+fn token_jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count() as f32;
+    let union = a.union(b).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
     }
 }
 

@@ -63,6 +63,16 @@ impl MemoryMetadata {
 
         Ok(serde_json::to_string(&canonical)?)
     }
+
+    /// Returns `true` when `ttl_seconds` is set and `reference_ms` is at or past expiration.
+    pub fn is_expired_at(&self, reference_ms: i64) -> bool {
+        self.ttl_seconds.is_some_and(|ttl| {
+            let ttl_ms = i64::try_from(ttl)
+                .unwrap_or(i64::MAX / 2)
+                .saturating_mul(1000);
+            reference_ms >= self.created_at_ms.saturating_add(ttl_ms)
+        })
+    }
 }
 
 /// Complete virtual memory file node read from or written to a branch workspace.
@@ -104,6 +114,12 @@ impl MemoryNode {
     /// Sets the importance score of this node.
     pub fn with_importance(mut self, importance: f32) -> Self {
         self.metadata.importance = importance;
+        self
+    }
+
+    /// Sets the optional TTL (in seconds) of this node.
+    pub fn with_ttl_seconds(mut self, ttl_seconds: Option<u64>) -> Self {
+        self.metadata.ttl_seconds = ttl_seconds;
         self
     }
 

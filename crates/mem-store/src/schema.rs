@@ -1,10 +1,10 @@
 //! SQLite WAL initialization and schema DDL for `mem-store`.
 
 use mem_core::{MemError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// Configures SQLite pragmas and initializes the CAS, Merkle tree, commit, ref,
-/// and workspace tables idempotently.
+/// workspace, search index, and sidecar telemetry/mining tables idempotently.
 pub fn initialize_database(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -72,6 +72,7 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
             start_line INTEGER NOT NULL,
             end_line INTEGER NOT NULL,
             embedding BLOB,
+            embedding_bq BLOB,
             PRIMARY KEY (blob_id, chunk_seq)
         );
 
@@ -100,13 +101,65 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
             model TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS blob_signatures (
+            blob_id TEXT PRIMARY KEY REFERENCES blobs(blob_id) ON DELETE CASCADE,
+            simhash64 INTEGER NOT NULL,
+            token_count INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_telemetry (
+            branch TEXT NOT NULL,
+            path TEXT NOT NULL,
+            blob_id TEXT NOT NULL,
+            search_hits INTEGER NOT NULL DEFAULT 0,
+            read_hits INTEGER NOT NULL DEFAULT 0,
+            post_hit_commits INTEGER NOT NULL DEFAULT 0,
+            post_hit_rewinds INTEGER NOT NULL DEFAULT 0,
+            last_accessed_ms INTEGER NOT NULL,
+            PRIMARY KEY (branch, path)
+        );
+
+        CREATE TABLE IF NOT EXISTS rewind_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            branch TEXT NOT NULL,
+            abandoned_commit_id TEXT NOT NULL,
+            target_commit_id TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            mined INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE INDEX IF NOT EXISTS idx_trees_tree_id ON trees(tree_id);
         CREATE INDEX IF NOT EXISTS idx_workspace_entries_branch ON workspace_entries(branch);
         CREATE INDEX IF NOT EXISTS idx_blob_links_target ON blob_links(target_ref);
         CREATE INDEX IF NOT EXISTS idx_blob_links_source ON blob_links(source_blob_id);
+        CREATE INDEX IF NOT EXISTS idx_blob_signatures_simhash ON blob_signatures(simhash64);
+        CREATE INDEX IF NOT EXISTS idx_rewind_events_branch ON rewind_events(branch, mined);
         "#,
     )
     .map_err(|e| MemError::Storage(format!("failed to initialize sqlite schema: {e}")))?;
 
+    ensure_column(conn, "chunk_index", "embedding_bq", "BLOB")?;
+
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| MemError::Storage(format!("failed to inspect table '{table}': {e}")))?
+        .is_some();
+    if !exists {
+        match conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}")) {
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            other => other.map_err(|e| {
+                MemError::Storage(format!("failed to migrate '{table}.{column}': {e}"))
+            })?,
+        }
+    }
     Ok(())
 }

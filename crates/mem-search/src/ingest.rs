@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ConsolidateLlmConfig, ProviderBackend};
 use crate::embedder::post_json_http_or_curl;
 use crate::hybrid::{MemSearchEngine, SearchRequest};
+use crate::sanitize::{
+    compute_simhash64, denoise_markdown, is_linkworthy_anchor, redact_secrets, simhash_hamming,
+};
 use crate::wiki::parse_wiki_document;
 
 const LLM_TIMEOUT: Duration = Duration::from_secs(20);
@@ -128,6 +131,9 @@ pub struct IngestRequest {
     pub commit: bool,
     /// Whether to attempt optional OpenAI-compatible/Ollama LLM formatting before deterministic fallback.
     pub use_llm: bool,
+    /// Optional 64-bit SimHash Hamming distance threshold for near-duplicate suppression (defaults to `Some(3)` for `Bot`).
+    #[serde(default)]
+    pub dedup_hamming_threshold: Option<u32>,
 }
 
 impl IngestRequest {
@@ -147,6 +153,7 @@ impl IngestRequest {
             commit_message: None,
             commit: true,
             use_llm: false,
+            dedup_hamming_threshold: (role == IngestRole::Bot).then_some(3),
         }
     }
 
@@ -219,6 +226,12 @@ impl IngestRequest {
         self.use_llm = use_llm;
         self
     }
+
+    /// Configures the 64-bit SimHash Hamming distance threshold for near-duplicate suppression (`None` disables).
+    pub fn with_dedup_threshold(mut self, threshold: Option<u32>) -> Self {
+        self.dedup_hamming_threshold = threshold;
+        self
+    }
 }
 
 /// Result metadata and rendered Markdown returned by [`ingest_knowledge`].
@@ -246,6 +259,12 @@ pub struct IngestOutcome {
     pub used_llm: bool,
     /// Rendered Obsidian-compatible Markdown written into Engram.
     pub markdown: String,
+    /// True when near-duplicate suppression matched an existing active note in the same tier.
+    #[serde(default)]
+    pub deduplicated: bool,
+    /// Number of secret credentials redacted by the deterministic sanitizer.
+    #[serde(default)]
+    pub secrets_redacted: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -262,12 +281,16 @@ pub fn ingest_knowledge(
     req: &IngestRequest,
     llm_config: Option<&ConsolidateLlmConfig>,
 ) -> Result<IngestOutcome> {
-    let raw_trimmed = req.raw_text.trim();
-    if raw_trimmed.is_empty() {
+    let raw_input = req.raw_text.trim();
+    if raw_input.is_empty() {
         return Err(MemError::Serialization(
             "ingest text cannot be empty".to_string(),
         ));
     }
+
+    let (redacted_text, secrets_redacted) = redact_secrets(raw_input);
+    let denoised_text = denoise_markdown(&redacted_text, true);
+    let raw_trimmed = denoised_text.trim();
 
     let target_branch = resolve_target_branch(engine, req)?;
     let target_rev = Revision::BranchWorkspace(target_branch.clone());
@@ -281,6 +304,41 @@ pub fn ingest_knowledge(
         .unwrap_or_else(|| req.role.default_tier());
     let resolved_path = resolve_target_path(req, resolved_tier, &resolved_title)?;
 
+    let resolved_tags = normalize_tags(req.role, resolved_tier, &req.tags);
+
+    if req.path.is_none() {
+        if let Some(max_bits) = req.dedup_hamming_threshold {
+            let (simhash, token_count) = compute_simhash64(raw_trimmed);
+            if token_count >= 6 {
+                if let Some((existing_path, existing_blob, existing_title, existing_md)) =
+                    find_near_duplicate_active(
+                        engine,
+                        &target_rev,
+                        resolved_tier,
+                        simhash,
+                        max_bits,
+                    )?
+                {
+                    return Ok(IngestOutcome {
+                        branch: target_branch,
+                        path: existing_path,
+                        title: existing_title,
+                        role: req.role,
+                        blob_id: existing_blob,
+                        commit_id: None,
+                        linked_notes: Vec::new(),
+                        matched_paths: Vec::new(),
+                        tags: resolved_tags,
+                        used_llm: false,
+                        markdown: existing_md,
+                        deduplicated: true,
+                        secrets_redacted,
+                    });
+                }
+            }
+        }
+    }
+
     let (linked_notes, matched_paths, weave_pairs) = discover_related_notes(
         engine,
         &target_rev,
@@ -289,7 +347,6 @@ pub fn ingest_knowledge(
         raw_trimmed,
     )?;
 
-    let resolved_tags = normalize_tags(req.role, resolved_tier, &req.tags);
     let resolved_importance = req
         .importance
         .unwrap_or_else(|| req.role.default_importance())
@@ -385,7 +442,65 @@ pub fn ingest_knowledge(
         tags: resolved_tags,
         used_llm,
         markdown,
+        deduplicated: false,
+        secrets_redacted,
     })
+}
+
+fn find_near_duplicate_active(
+    engine: &MemSearchEngine,
+    rev: &Revision,
+    tier: MemoryTier,
+    target_simhash: u64,
+    max_hamming: u32,
+) -> Result<Option<(VirtualPath, BlobId, String, String)>> {
+    let tier_prefix = VirtualPath::new(format!("/{}", tier.as_str()))?;
+    let active = engine.vcs().list(rev, Some(&tier_prefix))?;
+    if active.is_empty() {
+        return Ok(None);
+    }
+    engine.ensure_revision_indexed(rev, Some(&tier_prefix))?;
+
+    let mut matched_entry: Option<(VirtualPath, BlobId)> = None;
+    engine.vcs().store().with_conn(|conn| {
+        let mut stmt = conn
+            .prepare_cached("SELECT simhash64, token_count FROM blob_signatures WHERE blob_id = ?1")
+            .map_err(|e| MemError::Storage(format!("failed to prepare simhash lookup: {e}")))?;
+        for (path, blob_id, _) in &active {
+            let row: Option<(i64, i64)> =
+                match stmt.query_row(params![blob_id.to_hex()], |r| Ok((r.get(0)?, r.get(1)?))) {
+                    Ok(v) => Some(v),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => {
+                        return Err(MemError::Storage(format!("failed to query simhash: {e}")));
+                    }
+                };
+            if let Some((raw_sig, tok_count)) = row {
+                if tok_count >= 6 {
+                    let sig = u64::from_ne_bytes(raw_sig.to_ne_bytes());
+                    if simhash_hamming(target_simhash, sig) <= max_bits_clamp(max_hamming) {
+                        matched_entry = Some((path.clone(), *blob_id));
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    let Some((path, blob_id)) = matched_entry else {
+        return Ok(None);
+    };
+    let Some(node) = engine.vcs().read(rev, &path)? else {
+        return Ok(None);
+    };
+    let markdown = String::from_utf8_lossy(&node.content).into_owned();
+    let parsed = parse_wiki_document(&path, &markdown, 512);
+    Ok(Some((path, blob_id, parsed.title, markdown)))
+}
+
+fn max_bits_clamp(max_hamming: u32) -> u32 {
+    max_hamming.min(16)
 }
 
 fn resolve_target_branch(engine: &MemSearchEngine, req: &IngestRequest) -> Result<String> {
@@ -563,27 +678,47 @@ fn discover_related_notes(
         }
     }
 
-    // 2. Direct title/alias matching against active branch notes (for natural inline weaving).
+    // 2. Direct title/alias matching against active branch notes (for natural inline weaving),
+    // filtered by IDF / anti-hub heuristics so generic terms never cause hub noise.
+    let total_docs = active_anchors.len();
+    let mut term_doc_freq: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for anchor in &active_anchors {
+        let mut seen_terms = HashSet::new();
+        let t_low = anchor.title.trim().to_ascii_lowercase();
+        if !t_low.is_empty() && seen_terms.insert(t_low.clone()) {
+            *term_doc_freq.entry(t_low).or_insert(0) += 1;
+        }
+        for alias in &anchor.aliases {
+            let a_low = alias.trim().to_ascii_lowercase();
+            if !a_low.is_empty() && seen_terms.insert(a_low.clone()) {
+                *term_doc_freq.entry(a_low).or_insert(0) += 1;
+            }
+        }
+    }
+
     for anchor in &active_anchors {
         if &anchor.path == target_path || anchor.title.eq_ignore_ascii_case(resolved_title) {
             continue;
         }
         let mut matched_anchor = false;
         let anchor_title_lower = anchor.title.to_ascii_lowercase();
-        if anchor.title.chars().count() >= 2
+        let title_df = term_doc_freq.get(&anchor_title_lower).copied().unwrap_or(1);
+        if is_linkworthy_anchor(&anchor.title, title_df, total_docs)
             && contains_term_boundary(&raw_lower, &anchor_title_lower)
         {
             weave_pairs.push((anchor.title.clone(), anchor.title.clone()));
             matched_anchor = true;
-        } else if anchor.title.chars().count() >= 2
+        } else if is_linkworthy_anchor(&anchor.title, title_df, total_docs)
             && contains_term_boundary(&title_lower, &anchor_title_lower)
         {
             matched_anchor = true;
         }
 
         for alias in &anchor.aliases {
-            if alias.chars().count() >= 2 {
-                let alias_lower = alias.to_ascii_lowercase();
+            let alias_lower = alias.to_ascii_lowercase();
+            let alias_df = term_doc_freq.get(&alias_lower).copied().unwrap_or(1);
+            if is_linkworthy_anchor(alias, alias_df, total_docs) {
                 if contains_term_boundary(&raw_lower, &alias_lower) {
                     weave_pairs.push((alias.clone(), anchor.title.clone()));
                     matched_anchor = true;

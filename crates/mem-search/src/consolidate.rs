@@ -13,6 +13,9 @@ use serde::Deserialize;
 use crate::config::{ConsolidateLlmConfig, ProviderBackend};
 use crate::embedder::post_json_http_or_curl;
 use crate::hybrid::{MemSearchEngine, SearchRequest};
+use crate::ingest::weave_inline_wikilinks;
+use crate::sanitize::{denoise_markdown, is_linkworthy_anchor, redact_secrets};
+use crate::wiki::parse_wiki_document;
 
 const MAX_FILES_PER_BATCH: usize = 8;
 /// Prompt budget in UTF-8 bytes (~15k tokens for CJK text): one source part plus 3 context notes.
@@ -193,7 +196,9 @@ fn split_parts(text: &str, max: usize) -> Vec<String> {
 
 /// Loads a source file (in parts) and its top related semantic/procedural notes (search, no LLM).
 fn load_source(engine: &MemSearchEngine, rev: &Revision, path: VirtualPath) -> Result<Vec<Source>> {
-    let text = read_text(engine, rev, &path)?.unwrap_or_default();
+    let raw_text = read_text(engine, rev, &path)?.unwrap_or_default();
+    let (redacted, _) = redact_secrets(&raw_text);
+    let text = denoise_markdown(&redacted, false);
     let title = text
         .lines()
         .find_map(|l| l.strip_prefix("# "))
@@ -455,10 +460,19 @@ pub fn consolidate_retry(
             let path = VirtualPath::new(&note.path)?;
             let current = read_text(engine, &rev, &path)?;
             // Deny a repeated path, a full rewrite of an existing note the batch never saw, a
-            // rewrite that removes more than half of a note, and a new note that already exists
-            // in the other tier.
+            // rewrite that removes more than half of a note or strips all [[Wikilinks]] without
+            // supersession, and a new note that already exists in the other tier.
             let denied = match &current {
-                Some(old) => !seen.contains(&path) || note.content.len() * 2 < old.len(),
+                Some(old) => {
+                    let old_links = parse_wiki_document(&path, old, 512).wikilinks;
+                    let new_links = parse_wiki_document(&path, &note.content, 512).wikilinks;
+                    let declares_supersede =
+                        note.content.to_ascii_lowercase().contains("supersedes")
+                            || note.content.contains("Deprecated");
+                    let dropped_all_links =
+                        !old_links.is_empty() && new_links.is_empty() && !declares_supersede;
+                    !seen.contains(&path) || note.content.len() * 2 < old.len() || dropped_all_links
+                }
                 None => tier_twins.contains(without_tier(path.as_str())),
             };
             if answered.contains(&path) || denied {
@@ -480,6 +494,59 @@ pub fn consolidate_retry(
     if notes.is_empty() {
         out.status = ConsolidateStatus::NoChanges;
         return Ok(out);
+    }
+
+    // Weave non-self active [[Wikilinks]] deterministically into newly generated or updated notes.
+    let anchors = load_non_episodic_anchors(engine, &rev)?;
+    if !anchors.is_empty() {
+        let total_docs = anchors.len();
+        let mut doc_freq: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (a_path, a_title, a_aliases) in &anchors {
+            let _ = a_path;
+            let mut seen_t = std::collections::HashSet::new();
+            let tl = a_title.trim().to_ascii_lowercase();
+            if !tl.is_empty() && seen_t.insert(tl.clone()) {
+                *doc_freq.entry(tl).or_insert(0) += 1;
+            }
+            for al in a_aliases {
+                let all = al.trim().to_ascii_lowercase();
+                if !all.is_empty() && seen_t.insert(all.clone()) {
+                    *doc_freq.entry(all).or_insert(0) += 1;
+                }
+            }
+        }
+
+        for (note_path, content) in notes.iter_mut() {
+            let parsed_note = parse_wiki_document(note_path, content, 512);
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for (a_path, a_title, a_aliases) in &anchors {
+                if a_path == note_path || a_title.eq_ignore_ascii_case(&parsed_note.title) {
+                    continue;
+                }
+                let t_df = doc_freq
+                    .get(&a_title.trim().to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(1);
+                if is_linkworthy_anchor(a_title, t_df, total_docs) {
+                    pairs.push((a_title.clone(), a_title.clone()));
+                }
+                for al in a_aliases {
+                    let a_df = doc_freq
+                        .get(&al.trim().to_ascii_lowercase())
+                        .copied()
+                        .unwrap_or(1);
+                    if is_linkworthy_anchor(al, a_df, total_docs) {
+                        pairs.push((al.clone(), a_title.clone()));
+                    }
+                }
+            }
+            pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
+            pairs.dedup();
+            if !pairs.is_empty() {
+                *content = weave_body_preserving_frontmatter(content, &pairs);
+            }
+        }
     }
     engine.vcs().create_branch(branch, &rev)?;
     let message = format!(
@@ -513,4 +580,48 @@ pub fn consolidate_retry(
             Err(e)
         }
     }
+}
+
+fn load_non_episodic_anchors(
+    engine: &MemSearchEngine,
+    rev: &Revision,
+) -> Result<Vec<(VirtualPath, String, Vec<String>)>> {
+    let entries = engine.vcs().list(rev, None)?;
+    let mut out = Vec::new();
+    for (path, _, _) in entries {
+        if path.tier() == MemoryTier::Episodic {
+            continue;
+        }
+        if let Some(text) = read_text(engine, rev, &path)? {
+            let parsed = parse_wiki_document(&path, &text, 512);
+            out.push((path, parsed.title, parsed.aliases));
+        }
+    }
+    Ok(out)
+}
+
+fn weave_body_preserving_frontmatter(markdown: &str, pairs: &[(String, String)]) -> String {
+    let lines: Vec<&str> = markdown.lines().collect();
+    if lines.first().is_some_and(|l| l.trim() == "---") {
+        if let Some(end_idx) = lines
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(idx, l)| (l.trim() == "---" || l.trim() == "...").then_some(idx))
+        {
+            let fm = lines[..=end_idx].join("\n");
+            let body = lines[end_idx + 1..].join("\n");
+            let woven = weave_inline_wikilinks(&body, pairs);
+            let mut result = format!("{fm}\n{woven}");
+            if markdown.ends_with('\n') && !result.ends_with('\n') {
+                result.push('\n');
+            }
+            return result;
+        }
+    }
+    let mut woven = weave_inline_wikilinks(markdown, pairs);
+    if markdown.ends_with('\n') && !woven.ends_with('\n') {
+        woven.push('\n');
+    }
+    woven
 }

@@ -505,6 +505,73 @@ fn read_chunked_body<R: BufRead>(reader: &mut R) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// L2-normalizes a float32 vector, returning a unit-length copy (or zero copy if norm is 0).
+pub fn normalize_vec(v: &[f32]) -> Vec<f32> {
+    let mut out = v.to_vec();
+    l2_normalize(&mut out);
+    out
+}
+
+/// Encodes a float32 vector into 1-bit Binary Quantization (sign bit `val > 0.0`) packed as
+/// little-endian `u64` words.
+pub fn encode_bq_vec(v: &[f32]) -> Vec<u8> {
+    if v.is_empty() {
+        return Vec::new();
+    }
+    let word_count = v.len().div_ceil(64);
+    let mut bytes = Vec::with_capacity(word_count * 8);
+    for chunk in v.chunks(64) {
+        let mut word = 0u64;
+        for (bit, &val) in chunk.iter().enumerate() {
+            if val > 0.0 {
+                word |= 1u64 << bit;
+            }
+        }
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+/// Decodes little-endian binary quantization bytes into `Vec<u64>`.
+pub fn decode_bq_words(bq_bytes: &[u8]) -> Vec<u64> {
+    if !bq_bytes.len().is_multiple_of(8) {
+        return Vec::new();
+    }
+    bq_bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| u64::from_le_bytes(*chunk))
+        .collect()
+}
+
+/// Computes Hamming distance between two binary-quantized `u64` word vectors using hardware `POPCNT`.
+pub fn bq_hamming_distance_words(a: &[u64], b: &[u64]) -> u32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x ^ y).count_ones())
+        .sum()
+}
+
+/// Computes dot product between unit vector `a` and raw little-endian `f32` unit vector bytes.
+pub fn dot_product_le_bytes(a: &[f32], le_bytes: &[u8]) -> Result<f32> {
+    if !le_bytes.len().is_multiple_of(4) {
+        return Err(MemError::Storage(format!(
+            "invalid float32 embedding byte length: {}",
+            le_bytes.len()
+        )));
+    }
+    if a.is_empty() || le_bytes.len() != a.len() * 4 {
+        return Ok(0.0);
+    }
+    let mut dot = 0.0f64;
+    for (&x, chunk) in a.iter().zip(le_bytes.as_chunks::<4>().0) {
+        let y = f32::from_le_bytes(*chunk);
+        dot += f64::from(x) * f64::from(y);
+    }
+    Ok(dot as f32)
+}
+
 /// Encodes a `f32` embedding slice as compact little-endian bytes for SQLite BLOB storage.
 pub fn encode_f32_vec(v: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(v.len() * 4);

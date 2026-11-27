@@ -82,6 +82,13 @@ pub fn run_gc(conn: &Connection) -> Result<GcStats> {
     let unreachable_blobs = collect_unreachable_blobs(conn, &reachable_blobs)?;
 
     delete_by_ids(conn, "commits", "commit_id", &unreachable_commits)?;
+    if !unreachable_commits.is_empty() {
+        conn.execute(
+            "DELETE FROM rewind_events WHERE abandoned_commit_id NOT IN (SELECT commit_id FROM commits)",
+            [],
+        )
+        .map_err(|e| MemError::Storage(format!("failed to clean orphaned rewind_events: {e}")))?;
+    }
     delete_by_ids(conn, "tree_objects", "tree_id", &unreachable_trees)?;
 
     let mut reclaimed_bytes: u64 = 0;

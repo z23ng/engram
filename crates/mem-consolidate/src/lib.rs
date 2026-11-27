@@ -15,7 +15,10 @@ use mem_core::{
     BlobId, CommitId, DiffEntry, MemError, MemoryMetadata, MemoryNode, MemoryTier, MergeConflict,
     MergeOutcome, MergeStrategy, Result, Revision, VirtualPath,
 };
-use mem_search::{parse_wiki_document, ConsolidateLlmConfig, MemSearchEngine};
+use mem_search::{
+    denoise_markdown, mark_rewind_events_mined, mine_branch, parse_wiki_document, redact_secrets,
+    ConsolidateLlmConfig, MemSearchEngine,
+};
 use mem_store::cas::get_blob_conn;
 use mem_vcs::VersionControlEngine;
 use serde::{Deserialize, Serialize};
@@ -26,6 +29,10 @@ use crate::extractor::{
 };
 use crate::llm::consolidate_with_llm;
 pub use crate::llm::LlmChatTransport;
+
+fn default_true() -> bool {
+    true
+}
 
 /// Parameters controlling a single cold-path consolidation run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +71,12 @@ pub struct ConsolidationRequest {
     pub dry_run: bool,
     /// Author recorded on the consolidation commit.
     pub author: String,
+    /// Mine unmined `rewind_events` and topology/promotion signals on `source_branch`.
+    #[serde(default = "default_true")]
+    pub mine_vcs_signals: bool,
+    /// Sweep TTL-expired memory paths onto the isolated consolidation branch.
+    #[serde(default = "default_true")]
+    pub sweep_expired: bool,
 }
 
 impl Default for ConsolidationRequest {
@@ -88,6 +101,8 @@ impl Default for ConsolidationRequest {
             decay_factor: 0.85,
             dry_run: false,
             author: "consolidator@engram".to_string(),
+            mine_vcs_signals: true,
+            sweep_expired: true,
         }
     }
 }
@@ -165,6 +180,16 @@ impl ConsolidationRequest {
         self.dry_run = dry_run;
         self
     }
+
+    pub fn with_mine_vcs_signals(mut self, mine: bool) -> Self {
+        self.mine_vcs_signals = mine;
+        self
+    }
+
+    pub fn with_sweep_expired(mut self, sweep: bool) -> Self {
+        self.sweep_expired = sweep;
+        self
+    }
 }
 
 /// Summary of a single semantic or procedural card produced during consolidation.
@@ -232,6 +257,18 @@ pub struct ConsolidationReport {
     pub merge_status: ConsolidationMergeStatus,
     /// Whether the temporary `consolidate_branch` was deleted after merge.
     pub consolidation_branch_deleted: bool,
+    /// Number of rewind-mined pitfall cards distilled onto the consolidation branch.
+    #[serde(default)]
+    pub pitfalls_distilled: usize,
+    /// Number of TTL-expired nodes deleted on the consolidation branch.
+    #[serde(default)]
+    pub expired_swept: usize,
+    /// Unresolved `[[Wikilink]]` targets discovered during branch topology mining.
+    #[serde(default)]
+    pub dangling_links: Vec<String>,
+    /// High-utility active paths recommended for tier promotion.
+    #[serde(default)]
+    pub promotion_candidates: Vec<VirtualPath>,
 }
 
 /// Cold-path background memory consolidator running exclusively on isolated branches.
@@ -289,7 +326,55 @@ impl ConsolidationEngine {
         let source_episode_paths: Vec<VirtualPath> =
             episodes.iter().map(|e| e.path.clone()).collect();
 
-        if episodes.is_empty() {
+        let mining_report = if req.mine_vcs_signals || req.sweep_expired {
+            Some(mine_branch(&self.search, &req.source_branch)?)
+        } else {
+            None
+        };
+        let rewind_pitfalls = if req.mine_vcs_signals {
+            mining_report
+                .as_ref()
+                .map(|r| r.rewind_pitfalls.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let expired_paths = if req.sweep_expired {
+            let mut raw_expired = mining_report
+                .as_ref()
+                .map(|r| r.expired_paths.clone())
+                .unwrap_or_default();
+            if !raw_expired.is_empty() {
+                let committed_rev = Revision::BranchHead(req.source_branch.clone());
+                let committed_tree = vcs.store().with_conn(|conn| {
+                    mem_vcs::tree::resolve_effective_tree(conn, &committed_rev, None)
+                })?;
+                raw_expired.retain(|p| committed_tree.contains_key(p));
+            }
+            raw_expired
+        } else {
+            Vec::new()
+        };
+        let dangling_links: Vec<String> = mining_report
+            .as_ref()
+            .map(|r| {
+                r.dangling_links
+                    .iter()
+                    .map(|d| d.target_ref.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let promotion_candidates: Vec<VirtualPath> = mining_report
+            .as_ref()
+            .map(|r| {
+                r.promotion_candidates
+                    .iter()
+                    .map(|c| c.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if episodes.is_empty() && rewind_pitfalls.is_empty() && expired_paths.is_empty() {
             return Ok(ConsolidationReport {
                 source_branch: req.source_branch.clone(),
                 consolidation_branch: None,
@@ -304,10 +389,16 @@ impl ConsolidationEngine {
                 diff_from_source: Vec::new(),
                 merge_status: ConsolidationMergeStatus::Skipped,
                 consolidation_branch_deleted: false,
+                pitfalls_distilled: 0,
+                expired_swept: 0,
+                dangling_links,
+                promotion_candidates,
             });
         }
 
-        let (candidates, used_llm, llm_fallback_reason) = if req.use_llm {
+        let (mut candidates, used_llm, llm_fallback_reason) = if episodes.is_empty() {
+            (Vec::new(), false, None)
+        } else if req.use_llm {
             match consolidate_with_llm(&self.llm_config, self.llm_transport.as_ref(), &episodes) {
                 Ok(llm_cards) => (llm_cards, true, None),
                 Err(err) => {
@@ -324,6 +415,33 @@ impl ConsolidationEngine {
         } else {
             (extract_deterministic_cards(&episodes), false, None)
         };
+
+        let pitfall_dir = VirtualPath::new("/procedural/pitfalls")?;
+        let mut pitfall_event_ids = Vec::with_capacity(rewind_pitfalls.len());
+        let pitfalls_distilled = rewind_pitfalls.len();
+        for pitfall in rewind_pitfalls {
+            pitfall_event_ids.push(pitfall.event_id);
+            let short_hex = &pitfall.abandoned_commit.to_hex()[..8];
+            let mut stmts = vec![pitfall.summary];
+            stmts.extend(pitfall.rules);
+            candidates.push(DistilledCandidate {
+                tier: MemoryTier::Procedural,
+                target_dir_override: Some(pitfall_dir.clone()),
+                title: format!("Rewind Pitfall {short_hex}"),
+                slug: format!("rewind-{short_hex}"),
+                aliases: vec![format!("pitfall-{short_hex}")],
+                tags: vec![
+                    "procedural".to_string(),
+                    "pitfall".to_string(),
+                    "rewind-mined".to_string(),
+                    "consolidated".to_string(),
+                ],
+                entities: Vec::new(),
+                statements: stmts,
+                source_paths: pitfall.reverted_paths,
+                importance: 0.85,
+            });
+        }
 
         let anchors = self.load_active_anchors(&source_rev)?;
         let consolidated_at = Utc::now().to_rfc3339();
@@ -380,6 +498,10 @@ impl ConsolidationEngine {
                 diff_from_source: Vec::new(),
                 merge_status: ConsolidationMergeStatus::Skipped,
                 consolidation_branch_deleted: false,
+                pitfalls_distilled,
+                expired_swept: expired_paths.len(),
+                dangling_links,
+                promotion_candidates,
             });
         }
 
@@ -409,7 +531,12 @@ impl ConsolidationEngine {
             });
         }
 
-        let archive_path = if req.archive_processed {
+        let mut expired_swept = 0usize;
+        for exp_path in &expired_paths {
+            expired_swept += vcs.delete_path(&consolidate_branch, exp_path)?;
+        }
+
+        let archive_path = if req.archive_processed && !episodes.is_empty() {
             Some(self.archive_processed_episodes(
                 &consolidate_branch,
                 &run_id,
@@ -429,6 +556,9 @@ impl ConsolidationEngine {
             episodes.len()
         );
         let commit_id = vcs.commit(&consolidate_branch, &req.author, &commit_msg)?;
+        if !pitfall_event_ids.is_empty() {
+            mark_rewind_events_mined(vcs.store(), &pitfall_event_ids)?;
+        }
 
         let diff_from_source = vcs.diff(
             &Revision::BranchHead(req.source_branch.clone()),
@@ -478,6 +608,10 @@ impl ConsolidationEngine {
             diff_from_source,
             merge_status,
             consolidation_branch_deleted: branch_deleted,
+            pitfalls_distilled,
+            expired_swept,
+            dangling_links,
+            promotion_candidates,
         })
     }
 
@@ -519,9 +653,11 @@ impl ConsolidationEngine {
                     .map(|(b, _)| b)
                     .ok_or_else(|| MemError::BlobNotFound(blob_id.to_hex()))
             })?;
-            let Ok(raw_text) = String::from_utf8(raw_bytes) else {
+            let Ok(raw_raw_text) = String::from_utf8(raw_bytes) else {
                 continue;
             };
+            let (redacted, _) = redact_secrets(&raw_raw_text);
+            let raw_text = denoise_markdown(&redacted, true);
             let parsed = parse_wiki_document(&path, &raw_text, 800);
             let mut merged_tags = meta.tags.clone();
             for t in parsed.tags {
@@ -568,14 +704,17 @@ impl ConsolidationEngine {
                     .map(|(b, _)| b)
                     .ok_or_else(|| MemError::BlobNotFound(blob_id.to_hex()))
             })?;
-            let Ok(raw_text) = String::from_utf8(raw_bytes) else {
+            let Ok(raw_raw_text) = String::from_utf8(raw_bytes) else {
                 continue;
             };
+            let (redacted, _) = redact_secrets(&raw_raw_text);
+            let raw_text = denoise_markdown(&redacted, true);
             let parsed = parse_wiki_document(&path, &raw_text, 800);
             anchors.push(BranchAnchor {
                 path,
                 title: parsed.title,
                 aliases: parsed.aliases,
+                tags: parsed.tags,
             });
         }
         Ok(anchors)
@@ -685,7 +824,9 @@ fn resolve_card_path(
     procedural_dir: &VirtualPath,
     used_paths: &mut HashSet<VirtualPath>,
 ) -> Result<VirtualPath> {
-    let dir = if cand.tier == MemoryTier::Procedural {
+    let dir = if let Some(ref custom) = cand.target_dir_override {
+        custom.as_str()
+    } else if cand.tier == MemoryTier::Procedural {
         procedural_dir.as_str()
     } else {
         semantic_dir.as_str()
